@@ -1,0 +1,78 @@
+# ============================================================
+# XGBoost Model Training Configuration
+# Affective State Recognition (Boredom, Engagement, Confusion, Frustration)
+# ============================================================
+
+# --- Data ---
+data:
+  features_path: "daisee_features/X_features.npy"
+  labels:
+    boredom:     "daisee_features/y_boredom.npy"
+    engagement:  "daisee_features/y_engagement.npy"
+    confusion:   "daisee_features/y_confusion.npy"
+    frustration: "daisee_features/y_frustration.npy"
+  dataset_pkl: "daisee_features/complete_dataset.pkl"
+  sequence_length: 150
+  num_features: 78
+  # Train / val / test split ratios (must sum to 1.0)
+  train_ratio: 0.70
+  val_ratio:   0.15
+  test_ratio:  0.15
+  random_seed: 42
+
+# --- Normalization ---
+normalization:
+  enabled: true
+  strategy: "mixed"   # options: standard | minmax | robust | mixed | none
+
+# --- Feature Engineering ---
+feature_engineering:
+  enabled: true
+  include_statistical:  true
+  include_temporal:     true
+  include_frequency:    true
+  include_interaction:  true
+  include_domain:       true
+
+# --- Model ---
+model:
+  name: "xgboost"
+  num_classes: 4
+  use_gpu: true
+
+# --- XGBoost Hyperparameters ---
+xgboost:
+  objective: "multi:softprob"
+  max_depth: 8
+  learning_rate: 0.05
+  n_estimators: 500
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_child_weight: 3
+  gamma: 0.1
+  reg_alpha: 0.1       # L1 regularization
+  reg_lambda: 1.0      # L2 regularization
+  random_state: 42
+  n_jobs: -1
+  verbosity: 0
+  early_stopping_rounds: 50
+
+# --- Evaluation ---
+evaluation:
+  # Affective states to evaluate
+  states:
+    - boredom
+    - engagement
+    - confusion
+    - frustration
+  # Feature importance top-k features to report
+  feature_importance_top_k: 20
+  feature_importance_type: "gain"   # options: gain | weight | cover
+
+# --- Output ---
+output:
+  base_dir: "outputs"
+  # Checkpoint filename saved inside checkpoints/
+  checkpoint_filename: "final_model.pt"
+  # TensorBoard logging (not applicable for XGBoost, set to false)
+  tensorboard: false

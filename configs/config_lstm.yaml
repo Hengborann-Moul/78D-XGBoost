@@ -1,0 +1,84 @@
+# ============================================================
+# LSTM Model Training Configuration
+# Affective State Recognition (Boredom, Engagement, Confusion, Frustration)
+# ============================================================
+
+# --- Data ---
+data:
+  features_path: "daisee_features/X_features.npy"
+  labels:
+    boredom:    "daisee_features/y_boredom.npy"
+    engagement: "daisee_features/y_engagement.npy"
+    confusion:  "daisee_features/y_confusion.npy"
+    frustration: "daisee_features/y_frustration.npy"
+  dataset_pkl: "daisee_features/complete_dataset.pkl"
+  sequence_length: 150
+  num_features: 78
+  # Train / val / test split ratios (must sum to 1.0)
+  train_ratio: 0.75
+  val_ratio:   0.15
+  test_ratio:  0.15
+  random_seed: 42
+
+# --- Normalization ---
+normalization:
+  enabled: true
+  strategy: "mixed"   # options: standard | minmax | robust | mixed | none
+
+# --- Model Architecture ---
+model:
+  name: "lstm"
+  input_dim: 78
+  hidden_dim: 256
+  num_layers: 2
+  num_classes: 4
+  dropout: 0.3
+  bidirectional: true
+  use_attention: true
+  use_projection: true
+
+# --- Loss ---
+loss:
+  use_focal_loss: true
+  num_classes: 4
+
+# --- Training ---
+training:
+  batch_size: 32
+  num_epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.01
+  # Gradient clipping
+  grad_clip_norm: 1.0
+  # Early stopping
+  patience: 15
+  # Weighted sampler for class imbalance
+  use_weighted_sampler: true
+  # DataLoader workers
+  num_workers: 4
+
+# --- Learning-Rate Scheduler ---
+scheduler:
+  name: "ReduceLROnPlateau"
+  mode: "min"
+  factor: 0.5
+  patience: 5
+  verbose: true
+
+# --- Evaluation ---
+evaluation:
+  batch_size: 64
+  # Affective states to evaluate
+  states:
+    - boredom
+    - engagement
+    - confusion
+    - frustration
+
+# --- Output ---
+output:
+  base_dir: "outputs"
+  # Checkpoint filename saved inside checkpoints/
+  checkpoint_filename: "final_model.pt"
+  # TensorBoard logging
+  tensorboard: true
