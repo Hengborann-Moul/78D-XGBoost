@@ -13,6 +13,8 @@ Author: Hengborann MOUL
 Date: 2026-03-05
 """
 
+import math
+import os
 import numpy as np
 import xgboost as xgb
 from typing import Any, Dict, List, Tuple, Optional
@@ -20,6 +22,8 @@ from sklearn.metrics import accuracy_score, f1_score, classification_report
 from sklearn.model_selection import RandomizedSearchCV
 import pickle
 import warnings
+import yaml
+from pathlib import Path
 
 
 class EngagementXGBoost:
@@ -56,9 +60,9 @@ class EngagementXGBoost:
         self.default_params = {
             "objective": "multi:softprob",  # Multi-class probability
             "num_class": num_classes,
-            "max_depth": 8,
+            "max_depth": 6,
             "learning_rate": 0.05,
-            "n_estimators": 500,
+            "n_estimators": 300,
             "subsample": 0.8,
             "colsample_bytree": 0.8,
             "min_child_weight": 3,
@@ -66,7 +70,10 @@ class EngagementXGBoost:
             "reg_alpha": 0.1,  # L1 regularization
             "reg_lambda": 1.0,  # L2 regularization
             "random_state": 42,
-            "n_jobs": -1,
+            # Use half available cores by default so the OS stays responsive.
+            # The caller (hyperparameter_search / retrain) can override via
+            # xgb_params if needed.
+            "n_jobs": max(1, math.floor((os.cpu_count() or 2) / 2)),
             "verbosity": 0,
         }
 
@@ -412,8 +419,10 @@ def hyperparameter_search(
     X_val: np.ndarray,
     y_val: Dict[str, np.ndarray],
     state: str = "engagement",
-    n_iter: int = 50,
+    n_iter: int = 30,
     cv: int = 3,
+    n_jobs: Optional[int] = None,
+    cfg: Optional[Dict] = None,
 ) -> Dict:
     """
     Perform hyperparameter search for one affective state.
@@ -421,50 +430,109 @@ def hyperparameter_search(
     Args:
         X_train: Training features
         y_train: Training labels
-        X_val: Validation features
-        y_val: Validation labels
-        state: Which affective state to optimize
-        n_iter: Number of iterations for random search
-        cv: Number of cross-validation folds
+        X_val:   Validation features
+        y_val:   Validation labels
+        state:   Which affective state to optimise
+        n_iter:  Number of iterations for random search
+        cv:      Number of cross-validation folds
+        n_jobs:  Parallel workers for RandomizedSearchCV.  Defaults to half
+                 the logical CPU count when None.  Pass -1 for all cores.
+        cfg:     Optional config dict (loaded from config_xgboost.yaml if not
+                 provided)
 
     Returns:
         best_params: Best hyperparameters found
     """
+    # ------------------------------------------------------------------
+    # Resolve n_jobs: default to half the CPU count so the machine stays
+    # usable while the search runs.
+    # ------------------------------------------------------------------
+    if n_jobs is None:
+        n_jobs = max(1, math.floor((os.cpu_count() or 2) / 2))
+    # ------------------------------------------------------------------
+    # Load config from config_xgboost.yaml if not supplied by the caller
+    # ------------------------------------------------------------------
+    if cfg is None:
+        config_path = Path(__file__).parent.parent.parent / "configs" / "config_xgboost.yaml"
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"config_xgboost.yaml not found at {config_path}. "
+                "Pass a cfg dict explicitly or ensure the config file exists."
+            )
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+        print(f"Loaded base config from: {config_path}")
+
+    xgb_cfg = cfg.get("xgboost", {})
+    model_cfg = cfg.get("model", {})
+
+    # Keys that belong to the search space or are constructor-only — exclude
+    # them from the fixed base params so the search can vary them freely.
+    SEARCH_KEYS = {
+        "max_depth", "learning_rate", "n_estimators",
+        "subsample", "colsample_bytree", "min_child_weight",
+        "gamma", "reg_alpha", "reg_lambda",
+        "early_stopping_rounds",
+    }
+    base_params = {k: v for k, v in xgb_cfg.items() if k not in SEARCH_KEYS}
+
+    # Ensure required fixed params are present (config values, fall back to defaults)
+    base_params.setdefault("objective", "multi:softprob")
+    base_params.setdefault("num_class", model_cfg.get("num_classes", 4))
+    base_params.setdefault("random_state", 42)
+    # Each individual XGBoost model inside the search uses a single thread so
+    # that all parallelism is at the RandomizedSearchCV level, preventing the
+    # CPU count from being squared (n_jobs_search × n_jobs_xgb).
+    base_params["n_jobs"] = 1
+    if model_cfg.get("use_gpu", False):
+        base_params.setdefault("tree_method", "hist")
+
     print(f"\n{'=' * 80}")
     print(f"HYPERPARAMETER SEARCH FOR: {state.upper()}")
     print(f"{'=' * 80}")
+    print(f"RandomizedSearchCV workers : {n_jobs}")
+    print("Base model params (fixed during search):")
+    for k, v in base_params.items():
+        print(f"  {k:25s}: {v}")
 
-    # Define search space
+    # ------------------------------------------------------------------
+    # Search space
+    # Kept deliberately modest: max_depth ≤ 8, n_estimators ≤ 500.
+    # Deeper trees + more estimators compound memory use multiplicatively
+    # across all CV folds and parallel jobs.
+    # ------------------------------------------------------------------
     param_distributions = {
-        "max_depth": [6, 8, 10, 12],
-        "learning_rate": [0.01, 0.05, 0.1],
-        "n_estimators": [300, 500, 700],
-        "subsample": [0.7, 0.8, 0.9],
+        "max_depth":        [4, 6, 8],
+        "learning_rate":    [0.01, 0.05, 0.1],
+        "n_estimators":     [200, 350, 500],
+        "subsample":        [0.7, 0.8, 0.9],
         "colsample_bytree": [0.7, 0.8, 0.9],
         "min_child_weight": [1, 3, 5],
-        "gamma": [0.0, 0.1, 0.2],
-        "reg_alpha": [0.0, 0.1, 1.0],
-        "reg_lambda": [0.5, 1.0, 2.0],
+        "gamma":            [0.0, 0.1, 0.2],
+        "reg_alpha":        [0.0, 0.1, 1.0],
+        "reg_lambda":       [0.5, 1.0, 2.0],
     }
 
-    # Base model
-    base_model = xgb.XGBClassifier(
-        objective="multi:softprob", num_classes=4, random_state=42, n_jobs=-1
-    )
+    # Base model seeded from config
+    base_model = xgb.XGBClassifier(**base_params)
 
+    # ------------------------------------------------------------------
     # Random search
+    # n_jobs here controls the number of parallel CV fits.
+    # Each individual XGBoost model uses n_jobs=1 (set above) so the total
+    # core usage stays at n_jobs, not n_jobs × n_jobs.
+    # ------------------------------------------------------------------
     search = RandomizedSearchCV(
         base_model,
         param_distributions=param_distributions,
         n_iter=n_iter,
         cv=cv,
         scoring="f1_macro",
-        n_jobs=-1,
+        n_jobs=n_jobs,
         verbose=2,
-        random_state=42,
+        random_state=base_params.get("random_state", 42),
     )
 
-    # Fit
     search.fit(X_train, y_train[state])
 
     print("\nBest parameters found:")
@@ -482,6 +550,7 @@ def hyperparameter_search(
     print(f"Validation F1:       {val_f1:.4f}")
 
     return search.best_params_
+
 
 
 if __name__ == "__main__":

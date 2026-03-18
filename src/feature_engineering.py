@@ -44,36 +44,64 @@ class FeatureEngineer:
     def _define_feature_groups(self) -> Dict[str, List[int]]:
         """Define semantic groups of features."""
         groups = {
-            'blendshapes': list(range(0, 52)),
-            'head_pose': list(range(52, 58)),
-            'eye_gaze': list(range(58, 64)),
-            'composite': list(range(64, 74)),
-            'dynamics': list(range(74, 78)),
-
+            "blendshapes": list(range(0, 52)),
+            "head_pose": list(range(52, 58)),
+            "eye_gaze": list(range(58, 64)),
+            "composite": list(range(64, 74)),
+            "dynamics": list(range(74, 78)),
             # Semantic sub-groups
-            'eyebrow': [0, 1, 2, 3, 4],  # browDown L/R, browInnerUp, browOuterUp L/R
-            'eye': list(range(8, 22)),   # All eye blendshapes
-            'jaw': [21, 22, 23, 24],     # jawForward, Open, Left, Right
-            'mouth': list(range(25, 50)), # All mouth blendshapes
-            'nose': [50, 51],            # noseSneer L/R
-            'cheek': [5, 6],             # cheekSquint L/R
-
+            "eyebrow": [0, 1, 2, 3, 4],  # browDown L/R, browInnerUp, browOuterUp L/R
+            "eye": list(range(8, 22)),  # All eye blendshapes
+            "jaw": [21, 22, 23, 24],  # jawForward, Open, Left, Right
+            "mouth": list(range(25, 50)),  # All mouth blendshapes
+            "nose": [50, 51],  # noseSneer L/R
+            "cheek": [5, 6],  # cheekSquint L/R
             # State indicators
-            'confusion_related': [0, 1, 18, 19, 29, 30, 70],  # browDown, eyeSquint, mouthFrown, confusion_indicator
-            'frustration_related': [2, 34, 35, 21, 71],       # browInnerUp, mouthPress, jawForward, frustration_indicator
-            'boredom_related': [8, 9, 10, 11, 22, 72],        # eyeBlink, eyeLookDown, jawOpen, boredom_indicator
-            'engagement_related': [20, 21, 2, 43, 44, 73],    # eyeWide, browInnerUp, mouthSmile, engagement_indicator
+            "confusion_related": [
+                0,
+                1,
+                18,
+                19,
+                29,
+                30,
+                70,
+            ],  # browDown, eyeSquint, mouthFrown, confusion_indicator
+            "frustration_related": [
+                2,
+                34,
+                35,
+                21,
+                71,
+            ],  # browInnerUp, mouthPress, jawForward, frustration_indicator
+            "boredom_related": [
+                8,
+                9,
+                10,
+                11,
+                22,
+                72,
+            ],  # eyeBlink, eyeLookDown, jawOpen, boredom_indicator
+            "engagement_related": [
+                20,
+                21,
+                2,
+                43,
+                44,
+                73,
+            ],  # eyeWide, browInnerUp, mouthSmile, engagement_indicator
         }
 
         return groups
 
-    def engineer_features(self,
-                         sequence: np.ndarray,
-                         include_statistical: bool = True,
-                         include_temporal: bool = True,
-                         include_frequency: bool = True,
-                         include_interaction: bool = True,
-                         include_domain: bool = True) -> Dict[str, np.ndarray]:
+    def engineer_features(
+        self,
+        sequence: np.ndarray,
+        include_statistical: bool = True,
+        include_temporal: bool = True,
+        include_frequency: bool = True,
+        include_interaction: bool = True,
+        include_domain: bool = True,
+    ) -> Dict[str, np.ndarray]:
         """
         Generate all engineered features from a sequence.
 
@@ -89,28 +117,30 @@ class FeatureEngineer:
             engineered_features: Dictionary of feature arrays
         """
         if sequence.ndim != 2 or sequence.shape[1] != self.base_dim:
-            raise ValueError(f"Expected shape (num_frames, {self.base_dim}), got {sequence.shape}")
+            raise ValueError(
+                f"Expected shape (num_frames, {self.base_dim}), got {sequence.shape}"
+            )
 
         features = {}
 
         if include_statistical:
-            features['statistical'] = self._compute_statistical_features(sequence)
+            features["statistical"] = self._compute_statistical_features(sequence)
 
         if include_temporal:
-            features['temporal'] = self._compute_temporal_features(sequence)
+            features["temporal"] = self._compute_temporal_features(sequence)
 
         if include_frequency:
-            features['frequency'] = self._compute_frequency_features(sequence)
+            features["frequency"] = self._compute_frequency_features(sequence)
 
         if include_interaction:
-            features['interaction'] = self._compute_interaction_features(sequence)
+            features["interaction"] = self._compute_interaction_features(sequence)
 
         if include_domain:
-            features['domain'] = self._compute_domain_features(sequence)
+            features["domain"] = self._compute_domain_features(sequence)
 
         # Flatten all features into single vector
         all_features = np.concatenate([v for v in features.values()])
-        features['all'] = all_features
+        features["all"] = all_features
 
         return features
 
@@ -132,17 +162,19 @@ class FeatureEngineer:
             signal = sequence[:, i]
 
             # Basic statistics
-            features.extend([
-                np.mean(signal),
-                np.std(signal),
-                np.min(signal),
-                np.max(signal),
-                np.median(signal),
-                np.percentile(signal, 25),
-                np.percentile(signal, 75),
-                np.max(signal) - np.min(signal),  # Range
-                np.percentile(signal, 75) - np.percentile(signal, 25),  # IQR
-            ])
+            features.extend(
+                [
+                    np.mean(signal),
+                    np.std(signal),
+                    np.min(signal),
+                    np.max(signal),
+                    np.median(signal),
+                    np.percentile(signal, 25),
+                    np.percentile(signal, 75),
+                    np.max(signal) - np.min(signal),  # Range
+                    np.percentile(signal, 75) - np.percentile(signal, 25),  # IQR
+                ]
+            )
 
             # Higher moments (with error handling)
             try:
@@ -184,13 +216,17 @@ class FeatureEngineer:
             accel_std = np.std(acceleration) if len(acceleration) > 0 else 0
 
             # Zero-crossing rate
-            zero_crossings = np.sum(np.diff(np.sign(feat_signal - np.mean(feat_signal))) != 0)
+            zero_crossings = np.sum(
+                np.diff(np.sign(feat_signal - np.mean(feat_signal))) != 0
+            )
             zcr = zero_crossings / len(feat_signal) if len(feat_signal) > 0 else 0
 
             # Peak count (normalized)
             try:
                 peaks, _ = signal.find_peaks(feat_signal)
-                peak_count = len(peaks) / len(feat_signal) if len(feat_signal) > 0 else 0
+                peak_count = (
+                    len(peaks) / len(feat_signal) if len(feat_signal) > 0 else 0
+                )
             except:
                 peak_count = 0
 
@@ -201,16 +237,18 @@ class FeatureEngineer:
             else:
                 slope = 0
 
-            features.extend([
-                velocity_mean,
-                velocity_std,
-                velocity_max_abs,
-                accel_mean,
-                accel_std,
-                zcr,
-                peak_count,
-                slope
-            ])
+            features.extend(
+                [
+                    velocity_mean,
+                    velocity_std,
+                    velocity_max_abs,
+                    accel_mean,
+                    accel_std,
+                    zcr,
+                    peak_count,
+                    slope,
+                ]
+            )
 
         return np.array(features, dtype=np.float32)
 
@@ -240,12 +278,12 @@ class FeatureEngineer:
 
             # Compute FFT
             fft_vals: np.ndarray = np.asarray(fft(signal_data - np.mean(signal_data)))
-            fft_freq: np.ndarray = np.asarray(fftfreq(n, 1/fps))
+            fft_freq: np.ndarray = np.asarray(fftfreq(n, 1 / fps))
 
             # Only positive frequencies
             pos_mask: np.ndarray = np.asarray(fft_freq > 0)
             fft_freq = fft_freq[pos_mask]
-            fft_power = np.abs(fft_vals[pos_mask])**2
+            fft_power = np.abs(fft_vals[pos_mask]) ** 2
 
             if len(fft_power) == 0 or np.sum(fft_power) == 0:
                 features.extend([0.0] * 7)
@@ -261,7 +299,9 @@ class FeatureEngineer:
             spectral_centroid = np.sum(fft_freq * fft_power_norm)
 
             # Spectral spread
-            spectral_spread = np.sqrt(np.sum(((fft_freq - spectral_centroid)**2) * fft_power_norm))
+            spectral_spread = np.sqrt(
+                np.sum(((fft_freq - spectral_centroid) ** 2) * fft_power_norm)
+            )
 
             # Spectral entropy
             spectral_entropy = -np.sum(fft_power_norm * np.log2(fft_power_norm + 1e-10))
@@ -275,15 +315,17 @@ class FeatureEngineer:
             mid_energy = np.sum(fft_power[mid_freq_mask]) / np.sum(fft_power)
             high_energy = np.sum(fft_power[high_freq_mask]) / np.sum(fft_power)
 
-            features.extend([
-                dominant_freq,
-                spectral_centroid,
-                spectral_spread,
-                spectral_entropy,
-                low_energy,
-                mid_energy,
-                high_energy
-            ])
+            features.extend(
+                [
+                    dominant_freq,
+                    spectral_centroid,
+                    spectral_spread,
+                    spectral_entropy,
+                    low_energy,
+                    mid_energy,
+                    high_energy,
+                ]
+            )
 
         return np.array(features, dtype=np.float32)
 
@@ -389,11 +431,13 @@ class FeatureEngineer:
         attention_over_time = []
         window_size = 30  # 1 second windows
         for start in range(0, len(sequence) - window_size, window_size):
-            window = sequence[start:start+window_size]
+            window = sequence[start : start + window_size]
             window_gaze = 1 - np.mean(np.abs(window[:, [62, 63]]))
             attention_over_time.append(window_gaze)
 
-        attention_consistency = 1 - np.std(attention_over_time) if attention_over_time else 0
+        attention_consistency = (
+            1 - np.std(attention_over_time) if attention_over_time else 0
+        )
         features.append(attention_consistency)
 
         # ===== AROUSAL LEVEL =====
@@ -408,16 +452,20 @@ class FeatureEngineer:
         # ===== VALENCE ESTIMATION =====
         # Positive: smiles, raised eyebrows
         # Negative: frowns, pressed lips, furrowed brows
-        positive_expressions = np.mean([
-            np.mean(sequence[:, [43, 44]]),  # mouthSmile
-            np.mean(sequence[:, [3, 4]]),    # browOuterUp
-        ])
+        positive_expressions = np.mean(
+            [
+                np.mean(sequence[:, [43, 44]]),  # mouthSmile
+                np.mean(sequence[:, [3, 4]]),  # browOuterUp
+            ]
+        )
 
-        negative_expressions = np.mean([
-            np.mean(sequence[:, [29, 30]]),  # mouthFrown
-            np.mean(sequence[:, [34, 35]]),  # mouthPress
-            np.mean(sequence[:, [0, 1]]),    # browDown
-        ])
+        negative_expressions = np.mean(
+            [
+                np.mean(sequence[:, [29, 30]]),  # mouthFrown
+                np.mean(sequence[:, [34, 35]]),  # mouthPress
+                np.mean(sequence[:, [0, 1]]),  # browDown
+            ]
+        )
 
         valence = positive_expressions - negative_expressions
         features.append(valence)  # Range: -1 (negative) to +1 (positive)
@@ -448,7 +496,9 @@ class FeatureEngineer:
         low_animation = 1 - np.mean(sequence[:, 74])
         head_down = -np.mean(sequence[:, 52])
 
-        boredom_detailed = (eye_closure_freq + downward_gaze + low_animation + max(0, head_down)) / 4
+        boredom_detailed = (
+            eye_closure_freq + downward_gaze + low_animation + max(0, head_down)
+        ) / 4
         features.append(np.clip(boredom_detailed, 0, 1))
 
         # Engagement score (detailed)
@@ -457,7 +507,9 @@ class FeatureEngineer:
         high_animation = np.mean(sequence[:, 74])
         forward_pose = 1 - abs(np.mean(sequence[:, 52]))
 
-        engagement_detailed = (wide_eyes + centered_attention + high_animation + forward_pose) / 4
+        engagement_detailed = (
+            wide_eyes + centered_attention + high_animation + forward_pose
+        ) / 4
         features.append(np.clip(engagement_detailed, 0, 1))
 
         # Confusion score (detailed)
@@ -475,13 +527,17 @@ class FeatureEngineer:
         jaw_forward = np.mean(sequence[:, 21])
         facial_tension = np.mean(sequence[:, 77])
 
-        frustration_detailed = (inner_brow_up + pressed_lips + jaw_forward + facial_tension) / 4
+        frustration_detailed = (
+            inner_brow_up + pressed_lips + jaw_forward + facial_tension
+        ) / 4
         features.append(np.clip(frustration_detailed, 0, 1))
 
         # ===== TEMPORAL PATTERNS =====
 
         # State transitions (how often does dominant state change)
-        state_indicators = sequence[:, [70, 71, 72, 73]]  # confusion, frustration, boredom, engagement
+        state_indicators = sequence[
+            :, [70, 71, 72, 73]
+        ]  # confusion, frustration, boredom, engagement
         dominant_states = np.argmax(state_indicators, axis=1)
         transitions = np.sum(np.diff(dominant_states) != 0) / len(dominant_states)
         features.append(transitions)
@@ -500,9 +556,104 @@ class FeatureEngineer:
 
         return np.array(features, dtype=np.float32)
 
-    def get_feature_importance_report(self,
-                                     sequences: np.ndarray,
-                                     labels: np.ndarray) -> pd.DataFrame:
+    def get_engineered_feature_names(self) -> List[str]:
+        """
+        Generate feature names for all engineered features.
+
+        This method mirrors the exact order of features produced by engineer_features().
+        Use this to get readable feature names for importance analysis.
+
+        Returns:
+            feature_names: List of engineered feature names
+        """
+        names = []
+
+        stat_suffixes = [
+            "mean",
+            "std",
+            "min",
+            "max",
+            "median",
+            "p25",
+            "p75",
+            "range",
+            "iqr",
+            "skewness",
+            "kurtosis",
+        ]
+        for base in self.feature_names:
+            for suf in stat_suffixes:
+                names.append(f"{base}_{suf}")
+
+        temporal_suffixes = [
+            "vel_mean",
+            "vel_std",
+            "vel_max_abs",
+            "accel_mean",
+            "accel_std",
+            "zcr",
+            "peak_count",
+            "slope",
+        ]
+        for base in self.feature_names:
+            for suf in temporal_suffixes:
+                names.append(f"{base}_{suf}")
+
+        freq_suffixes = [
+            "dominant_freq",
+            "spectral_centroid",
+            "spectral_spread",
+            "spectral_entropy",
+            "low_energy",
+            "mid_energy",
+            "high_energy",
+        ]
+        for base in self.feature_names:
+            for suf in freq_suffixes:
+                names.append(f"{base}_{suf}")
+
+        group_names = list(self.feature_groups.keys())
+        for i, g1 in enumerate(group_names):
+            for g2 in group_names[i + 1 :]:
+                if (
+                    len(self.feature_groups[g1]) >= 2
+                    and len(self.feature_groups[g2]) >= 2
+                ):
+                    names.append(f"corr_{g1}_{g2}")
+
+        names.extend(
+            [
+                "boredom_ratio",
+                "confusion_ratio",
+                "frustration_ratio",
+                "engagement_ratio",
+                "eye_asymmetry",
+                "smile_asymmetry",
+            ]
+        )
+
+        domain_names = [
+            "attention_score",
+            "attention_consistency",
+            "arousal_level",
+            "valence",
+            "cognitive_load",
+            "fatigue_score",
+            "boredom_detailed",
+            "engagement_detailed",
+            "confusion_detailed",
+            "frustration_detailed",
+            "state_transitions",
+            "expression_variability",
+            "micro_expression_count",
+        ]
+        names.extend(domain_names)
+
+        return names
+
+    def get_feature_importance_report(
+        self, sequences: np.ndarray, labels: np.ndarray
+    ) -> pd.DataFrame:
         """
         Generate feature importance report using correlation with labels.
 
@@ -519,7 +670,7 @@ class FeatureEngineer:
         engineered_features = []
         for i in range(num_videos):
             feat = self.engineer_features(sequences[i])
-            engineered_features.append(feat['all'])
+            engineered_features.append(feat["all"])
 
         X = np.array(engineered_features)
 
@@ -530,19 +681,18 @@ class FeatureEngineer:
             correlations.append(abs(corr) if not np.isnan(corr) else 0)
 
         # Create report
-        report = pd.DataFrame({
-            'feature_idx': range(len(correlations)),
-            'importance': correlations
-        })
-        report = report.sort_values('importance', ascending=False)
+        report = pd.DataFrame(
+            {"feature_idx": range(len(correlations)), "importance": correlations}
+        )
+        report = report.sort_values("importance", ascending=False)
 
         return report
 
 
 # Convenience functions
-def engineer_dataset_features(sequences: np.ndarray,
-                              feature_names: List[str],
-                              verbose: bool = True) -> np.ndarray:
+def engineer_dataset_features(
+    sequences: np.ndarray, feature_names: List[str], verbose: bool = True
+) -> np.ndarray:
     """
     Engineer features for entire dataset.
 
@@ -561,21 +711,22 @@ def engineer_dataset_features(sequences: np.ndarray,
 
     if verbose:
         from tqdm import tqdm
+
         iterator = tqdm(range(num_videos), desc="Engineering features")
     else:
         iterator = range(num_videos)
 
     for i in iterator:
         feat = engineer.engineer_features(sequences[i])
-        engineered_features.append(feat['all'])
+        engineered_features.append(feat["all"])
 
     return np.array(engineered_features)
 
 
 if __name__ == "__main__":
-    print("="*80)
+    print("=" * 80)
     print("Feature Engineering Module Demo")
-    print("="*80)
+    print("=" * 80)
 
     # Create dummy sequence
     num_frames = 150
@@ -598,17 +749,17 @@ if __name__ == "__main__":
         include_temporal=True,
         include_frequency=True,
         include_interaction=True,
-        include_domain=True
+        include_domain=True,
     )
 
     # Print results
     print("\nEngineered features:")
     for category, feat_array in features.items():
-        if category != 'all':
+        if category != "all":
             print(f"  {category:15s}: {len(feat_array):4d} features")
 
     print(f"\n  {'Total':15s}: {len(features['all']):4d} features")
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("Feature engineering complete!")
-    print("="*80)
+    print("=" * 80)

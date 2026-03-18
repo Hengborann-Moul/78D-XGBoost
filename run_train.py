@@ -39,6 +39,7 @@ sys.path.insert(0, str(SRC_DIR))
 import torch
 import pandas as pd
 import matplotlib
+
 matplotlib.use("Agg")  # non-interactive backend
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -66,11 +67,12 @@ from feature_engineering import FeatureEngineer, engineer_dataset_features
 # Constants
 # ---------------------------------------------------------------------------
 AFFECTIVE_STATES = ["boredom", "engagement", "confusion", "frustration"]
-CLASS_NAMES = ["Very Low", "Low", "High", "Very High"]
+CLASS_NAMES = ["Low", "Medium", "High", "Very High"]
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -91,6 +93,7 @@ def parse_args() -> argparse.Namespace:
 # Config helpers
 # ---------------------------------------------------------------------------
 
+
 def load_config(model: str) -> dict:
     config_path: Path = PROJECT_ROOT / "configs" / f"config_{model}.yaml"
 
@@ -107,6 +110,7 @@ def load_config(model: str) -> dict:
 # ---------------------------------------------------------------------------
 # Output directory helpers
 # ---------------------------------------------------------------------------
+
 
 def make_output_dirs(cfg: dict, model: str) -> Path:
     """
@@ -153,6 +157,7 @@ def update_latest_symlink(run_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
+
 
 def load_dataset(cfg: dict):
     """
@@ -240,6 +245,7 @@ def split_dataset(X, y, cfg):
 # Normalization
 # ---------------------------------------------------------------------------
 
+
 def normalize_data(X_train, X_val, X_test, cfg, run_dir, feature_names):
     norm_cfg = cfg.get("normalization", {})
     if not norm_cfg.get("enabled", True):
@@ -264,6 +270,7 @@ def normalize_data(X_train, X_val, X_test, cfg, run_dir, feature_names):
 # ---------------------------------------------------------------------------
 # PyTorch Dataset
 # ---------------------------------------------------------------------------
+
 
 class AffectiveDataset(Dataset):
     def __init__(self, X: np.ndarray, y: dict):
@@ -291,6 +298,7 @@ def make_weighted_sampler(y_train: dict) -> WeightedRandomSampler:
 # ---------------------------------------------------------------------------
 # LSTM training
 # ---------------------------------------------------------------------------
+
 
 def train_lstm(X_train, y_train, X_val, y_val, cfg, run_dir, device):
     model_cfg = cfg["model"]
@@ -477,7 +485,9 @@ def train_lstm(X_train, y_train, X_val, y_val, cfg, run_dir, device):
             patience_counter = 0
             torch.save(
                 model.state_dict(),
-                run_dir / "checkpoints" / cfg["output"].get("checkpoint_filename", "final_model.pt"),
+                run_dir
+                / "checkpoints"
+                / cfg["output"].get("checkpoint_filename", "final_model.pt"),
             )
             print(f"  ✓ Best model saved  (val_loss={best_val_loss:.4f})")
         else:
@@ -492,7 +502,9 @@ def train_lstm(X_train, y_train, X_val, y_val, cfg, run_dir, device):
     # Reload best weights
     model.load_state_dict(
         torch.load(
-            run_dir / "checkpoints" / cfg["output"].get("checkpoint_filename", "final_model.pt"),
+            run_dir
+            / "checkpoints"
+            / cfg["output"].get("checkpoint_filename", "final_model.pt"),
             map_location=device,
         )
     )
@@ -501,7 +513,9 @@ def train_lstm(X_train, y_train, X_val, y_val, cfg, run_dir, device):
     pd.DataFrame(history).to_csv(
         run_dir / "metrics" / "training_history.csv", index=False
     )
-    print(f"\n✓ Training history saved to {run_dir / 'metrics' / 'training_history.csv'}")
+    print(
+        f"\n✓ Training history saved to {run_dir / 'metrics' / 'training_history.csv'}"
+    )
 
     return model, history
 
@@ -509,6 +523,7 @@ def train_lstm(X_train, y_train, X_val, y_val, cfg, run_dir, device):
 # ---------------------------------------------------------------------------
 # XGBoost training
 # ---------------------------------------------------------------------------
+
 
 def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
     model_cfg = cfg["model"]
@@ -552,15 +567,19 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
     )
 
     # Save model
-    ckpt_path = run_dir / "checkpoints" / cfg["output"].get("checkpoint_filename", "final_model.pt")
+    ckpt_path = (
+        run_dir
+        / "checkpoints"
+        / cfg["output"].get("checkpoint_filename", "final_model.pt")
+    )
     # XGBoost is saved as .pt filename but internally it's a pkl container
     xgb_model.save(str(ckpt_path))
 
     # No epoch-based history for XGBoost — write a minimal CSV
     history_path = run_dir / "metrics" / "training_history.csv"
-    pd.DataFrame(
-        [{"note": "XGBoost does not produce per-epoch history."}]
-    ).to_csv(history_path, index=False)
+    pd.DataFrame([{"note": "XGBoost does not produce per-epoch history."}]).to_csv(
+        history_path, index=False
+    )
 
     return xgb_model, X_train_eng  # return engineered train data for later reuse
 
@@ -568,6 +587,7 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
 # ---------------------------------------------------------------------------
 # Evaluation helpers (shared LSTM / XGBoost)
 # ---------------------------------------------------------------------------
+
 
 def predict_lstm(model, X_test, y_test, device, batch_size=64):
     """Returns predictions dict and probabilities dict."""
@@ -603,6 +623,7 @@ def predict_xgboost(xgb_model, X_test_eng):
 # Ensemble training
 # ---------------------------------------------------------------------------
 
+
 def run_optimal_weight_search(
     lstm_probs: dict,
     xgb_probs: dict,
@@ -617,10 +638,12 @@ def run_optimal_weight_search(
         (lstm_weight, xgb_weight) — best pair found
     """
     state = ens_cfg.get("weight_search_state", "engagement")
-    step  = ens_cfg.get("weight_search_step", 0.05)
+    step = ens_cfg.get("weight_search_step", 0.05)
 
-    print(f"\nSearching optimal ensemble weights on val set "
-          f"(state={state}, step={step}) ...")
+    print(
+        f"\nSearching optimal ensemble weights on val set "
+        f"(state={state}, step={step}) ..."
+    )
 
     best_lstm_w, best_xgb_w = optimal_weight_search(
         lstm_probs, xgb_probs, y_val, state=state
@@ -631,9 +654,12 @@ def run_optimal_weight_search(
 
 
 def train_ensemble(
-    X_train, y_train,
-    X_val,   y_val,
-    X_test,  y_test,
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    X_test,
+    y_test,
     cfg: dict,
     run_dir: Path,
     device: torch.device,
@@ -653,10 +679,10 @@ def train_ensemble(
         all_probs     : dict[state -> np.ndarray]  (N, 4) probabilities
         lstm_history  : training history dict from LSTM
     """
-    lstm_cfg  = cfg["lstm"]
-    xgb_cfg   = cfg["xgboost"]
-    ens_cfg   = cfg["ensemble"]
-    out_cfg   = cfg["output"]
+    lstm_cfg = cfg["lstm"]
+    xgb_cfg = cfg["xgboost"]
+    ens_cfg = cfg["ensemble"]
+    out_cfg = cfg["output"]
 
     # ------------------------------------------------------------------
     # 1. Train LSTM
@@ -667,10 +693,10 @@ def train_ensemble(
 
     # Build a minimal cfg dict shaped like the standalone lstm config
     lstm_standalone_cfg = {
-        "model":    lstm_cfg["model"],
-        "loss":     lstm_cfg["loss"],
+        "model": lstm_cfg["model"],
+        "loss": lstm_cfg["loss"],
         "training": lstm_cfg["training"],
-        "scheduler":lstm_cfg["scheduler"],
+        "scheduler": lstm_cfg["scheduler"],
         "output": {
             "checkpoint_filename": out_cfg.get("lstm_checkpoint", "lstm_model.pt"),
             "tensorboard": out_cfg.get("tensorboard", True),
@@ -678,8 +704,13 @@ def train_ensemble(
     }
 
     lstm_model, lstm_history = train_lstm(
-        X_train, y_train, X_val, y_val,
-        lstm_standalone_cfg, run_dir, device,
+        X_train,
+        y_train,
+        X_val,
+        y_val,
+        lstm_standalone_cfg,
+        run_dir,
+        device,
     )
 
     # ------------------------------------------------------------------
@@ -689,16 +720,18 @@ def train_ensemble(
     print("ENSEMBLE — Step 2/2: Training XGBoost sub-model")
     print("=" * 70)
 
-    fe_cfg  = xgb_cfg.get("feature_engineering", {})
+    fe_cfg = xgb_cfg.get("feature_engineering", {})
     use_eng = fe_cfg.get("enabled", True)
 
     X_train_arr = np.array(X_train)
-    X_val_arr   = np.array(X_val)
-    X_test_arr  = np.array(X_test)
+    X_val_arr = np.array(X_val)
+    X_test_arr = np.array(X_test)
 
     if use_eng:
         print("\nEngineering features for training set ...")
-        X_train_eng = engineer_dataset_features(X_train_arr, feature_names, verbose=True)
+        X_train_eng = engineer_dataset_features(
+            X_train_arr, feature_names, verbose=True
+        )
         print("Engineering features for validation set ...")
         X_val_eng = engineer_dataset_features(X_val_arr, feature_names, verbose=False)
         print("Engineering features for test set ...")
@@ -706,13 +739,14 @@ def train_ensemble(
         print(f"Engineered feature dim: {X_train_eng.shape[1]}")
     else:
         X_train_eng = X_train_arr.reshape(len(X_train_arr), -1)
-        X_val_eng   = X_val_arr.reshape(len(X_val_arr),   -1)
-        X_test_eng  = X_test_arr.reshape(len(X_test_arr),  -1)
+        X_val_eng = X_val_arr.reshape(len(X_val_arr), -1)
+        X_test_eng = X_test_arr.reshape(len(X_test_arr), -1)
 
-    xgb_params       = xgb_cfg.get("params", {})
-    early_stopping   = xgb_params.get("early_stopping_rounds", 50)
-    xgb_model_params = {k: v for k, v in xgb_params.items()
-                        if k != "early_stopping_rounds"}
+    xgb_params = xgb_cfg.get("params", {})
+    early_stopping = xgb_params.get("early_stopping_rounds", 50)
+    xgb_model_params = {
+        k: v for k, v in xgb_params.items() if k != "early_stopping_rounds"
+    }
 
     xgb_model = EngagementXGBoost(
         num_classes=xgb_cfg["model"].get("num_classes", 4),
@@ -721,24 +755,35 @@ def train_ensemble(
         **xgb_model_params,
     )
     xgb_model.fit(
-        X_train_eng, y_train,
-        X_val_eng,   y_val,
+        X_train_eng,
+        y_train,
+        X_val_eng,
+        y_val,
         feature_names=None,
         verbose=True,
     )
-    xgb_model.save(str(run_dir / "checkpoints" / out_cfg.get("xgboost_checkpoint", "xgboost_model.pt")))
+    xgb_model.save(
+        str(
+            run_dir
+            / "checkpoints"
+            / out_cfg.get("xgboost_checkpoint", "xgboost_model.pt")
+        )
+    )
 
     # ------------------------------------------------------------------
     # 3. Optionally search optimal blend weights on the validation set
     # ------------------------------------------------------------------
     lstm_weight = ens_cfg.get("lstm_weight", 0.6)
-    xgb_weight  = ens_cfg.get("xgb_weight",  0.4)
+    xgb_weight = ens_cfg.get("xgb_weight", 0.4)
 
     if ens_cfg.get("search_optimal_weights", True):
         # Collect val-set probabilities from each sub-model
         eval_cfg = cfg.get("evaluation", {})
         lstm_val_preds, lstm_val_probs = predict_lstm(
-            lstm_model, X_val, y_val, device,
+            lstm_model,
+            X_val,
+            y_val,
+            device,
             batch_size=eval_cfg.get("batch_size", 64),
         )
         xgb_val_probs = xgb_model.predict_proba(X_val_eng)
@@ -770,7 +815,10 @@ def train_ensemble(
     # For the LSTM path it calls _get_lstm_predictions (batches through the model)
     # but that method doesn't batch — wrap manually for large test sets.
     lstm_test_preds, lstm_test_probs = predict_lstm(
-        lstm_model, X_test, y_test, device,
+        lstm_model,
+        X_test,
+        y_test,
+        device,
         batch_size=cfg.get("evaluation", {}).get("batch_size", 64),
     )
     xgb_test_probs = xgb_model.predict_proba(X_test_eng)
@@ -779,7 +827,9 @@ def train_ensemble(
     all_probs = {}
     all_preds = {}
     for state in AFFECTIVE_STATES:
-        blended = lstm_weight * lstm_test_probs[state] + xgb_weight * xgb_test_probs[state]
+        blended = (
+            lstm_weight * lstm_test_probs[state] + xgb_weight * xgb_test_probs[state]
+        )
         all_probs[state] = blended
         all_preds[state] = list(np.argmax(blended, axis=1))
 
@@ -870,9 +920,7 @@ def evaluate_and_save(all_preds, all_probs, y_test, run_dir):
     summary_df = pd.DataFrame(summary_rows)
     mean_row = summary_df[["accuracy", "f1_macro", "f1_weighted"]].mean()
     mean_row["state"] = "MEAN"
-    summary_df = pd.concat(
-        [summary_df, pd.DataFrame([mean_row])], ignore_index=True
-    )
+    summary_df = pd.concat([summary_df, pd.DataFrame([mean_row])], ignore_index=True)
     summary_df.to_csv(run_dir / "evaluation" / "test_summary.csv", index=False)
 
     print(
@@ -912,7 +960,9 @@ def plot_training_curves(history: dict, run_dir: Path):
 
         fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
-        axes[0].plot(epochs, history["train_loss"], label="Train Loss", color="steelblue")
+        axes[0].plot(
+            epochs, history["train_loss"], label="Train Loss", color="steelblue"
+        )
         axes[0].plot(epochs, history["val_loss"], label="Val Loss", color="tomato")
         axes[0].set_title("Loss")
         axes[0].set_xlabel("Epoch")
@@ -945,9 +995,7 @@ def plot_training_curves(history: dict, run_dir: Path):
     for state, color in zip(AFFECTIVE_STATES, colors):
         val_key = f"val_acc_{state}"
         if val_key in history:
-            axes[1].plot(
-                epochs, history[val_key], label=f"{state} (val)", color=color
-            )
+            axes[1].plot(epochs, history[val_key], label=f"{state} (val)", color=color)
     axes[1].set_title("Validation Accuracy per State")
     axes[1].set_xlabel("Epoch")
     axes[1].legend()
@@ -1015,7 +1063,9 @@ def plot_roc_curves(all_probs, y_test, run_dir: Path):
                 continue  # skip if only one class present
             fpr, tpr, _ = roc_curve(y_bin[:, i], y_prob[:, i])
             roc_auc = auc(fpr, tpr)
-            ax.plot(fpr, tpr, color=color, lw=2, label=f"{cls_name} (AUC={roc_auc:.3f})")
+            ax.plot(
+                fpr, tpr, color=color, lw=2, label=f"{cls_name} (AUC={roc_auc:.3f})"
+            )
 
         ax.plot([0, 1], [0, 1], "k--", lw=1)
         ax.set_xlim(0.0, 1.0)
@@ -1036,6 +1086,7 @@ def plot_roc_curves(all_probs, y_test, run_dir: Path):
 # Save config copy
 # ---------------------------------------------------------------------------
 
+
 def save_config_copy(cfg: dict, run_dir: Path):
     dest = run_dir / "config.yaml"
     with open(dest, "w") as f:
@@ -1046,6 +1097,7 @@ def save_config_copy(cfg: dict, run_dir: Path):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     args = parse_args()
@@ -1092,7 +1144,10 @@ def main():
         # Predict on test
         eval_cfg = cfg.get("evaluation", {})
         all_preds, all_probs = predict_lstm(
-            model, X_test, y_test, device,
+            model,
+            X_test,
+            y_test,
+            device,
             batch_size=eval_cfg.get("batch_size", 64),
         )
 
@@ -1112,7 +1167,9 @@ def main():
         # Engineer test features
         if fe_cfg.get("enabled", True):
             print("\nEngineering features for test set ...")
-            X_test_eng = engineer_dataset_features(np.array(X_test), feature_names, verbose=False)
+            X_test_eng = engineer_dataset_features(
+                np.array(X_test), feature_names, verbose=False
+            )
         else:
             X_test_eng = np.array(X_test).reshape(len(X_test), -1)
 
@@ -1130,10 +1187,15 @@ def main():
         print(f"\nDevice: {device}")
 
         ensemble, all_preds, all_probs, history = train_ensemble(
-            X_train, y_train,
-            X_val,   y_val,
-            X_test,  y_test,
-            cfg, run_dir, device,
+            X_train,
+            y_train,
+            X_val,
+            y_val,
+            X_test,
+            y_test,
+            cfg,
+            run_dir,
+            device,
             normalizer=normalizer,
             feature_names=feature_names,
         )
@@ -1144,7 +1206,8 @@ def main():
         # Ensemble advantage bar-chart
         plots_dir = _ensure_plots_dir(run_dir)
         ensemble.visualize_ensemble_advantage(
-            X_test, y_test,
+            X_test,
+            y_test,
             save_path=str(plots_dir / "ensemble_advantage.png"),
         )
 

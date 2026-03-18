@@ -6,13 +6,13 @@
 
 # --- Data ---
 data:
-  features_path: "daisee_features/X_features.npy"
+  features_path: "daisee_features_v2/X_features.npy"
   labels:
-    boredom:     "daisee_features/y_boredom.npy"
-    engagement:  "daisee_features/y_engagement.npy"
-    confusion:   "daisee_features/y_confusion.npy"
-    frustration: "daisee_features/y_frustration.npy"
-  dataset_pkl: "daisee_features/complete_dataset.pkl"
+    boredom:     "daisee_features_v2/y_boredom.npy"
+    engagement:  "daisee_features_v2/y_engagement.npy"
+    confusion:   "daisee_features_v2/y_confusion.npy"
+    frustration: "daisee_features_v2/y_frustration.npy"
+  dataset_pkl: "daisee_features_v2/complete_dataset.pkl"
   sequence_length: 150
   num_features: 78
   # Train / val / test split ratios (must sum to 1.0)
@@ -35,7 +35,7 @@ lstm:
     input_dim: 78
     hidden_dim: 256
     num_layers: 2
-    num_classes: 4
+    num_classes: 3
     dropout: 0.3
     bidirectional: true
     use_attention: true
@@ -44,7 +44,7 @@ lstm:
   # Loss
   loss:
     use_focal_loss: true
-    num_classes: 4
+    num_classes: 3
 
   # Training
   training:
@@ -79,7 +79,7 @@ xgboost:
 
   # Model
   model:
-    num_classes: 4
+    num_classes: 3
     use_gpu: true
 
   # XGBoost Hyperparameters
@@ -131,7 +131,7 @@ evaluation:
 # Output
 # ============================================================
 output:
-  base_dir: "outputs"
+  base_dir: "outputs_v2"
   # Filenames inside checkpoints/
   lstm_checkpoint:    "lstm_model.pt"
   xgboost_checkpoint: "xgboost_model.pt"
