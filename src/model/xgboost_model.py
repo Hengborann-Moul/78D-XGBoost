@@ -55,6 +55,9 @@ class EngagementXGBoost:
         calibration_method: str = "isotonic",
         optimize_thresholds: bool = False,
         threshold_metric: str = "f1_macro",
+        use_focal_loss: bool = False,
+        focal_alpha: float = 0.25,
+        focal_gamma: float = 2.0,
         **xgb_params,
     ):
         """
@@ -71,6 +74,9 @@ class EngagementXGBoost:
             calibration_method: 'isotonic' or 'sigmoid'
             optimize_thresholds: Optimize classification thresholds
             threshold_metric: Metric to optimize ('f1_macro', 'f1_weighted')
+            use_focal_loss: Use focal loss objective (recommended for imbalanced data)
+            focal_alpha: Focal loss alpha parameter (weighting factor, default 0.25)
+            focal_gamma: Focal loss gamma parameter (focusing parameter, default 2.0)
             **xgb_params: Additional XGBoost parameters
         """
         self.num_classes = num_classes
@@ -83,6 +89,9 @@ class EngagementXGBoost:
         self.calibration_method = calibration_method
         self.optimize_thresholds = optimize_thresholds
         self.threshold_metric = threshold_metric
+        self.use_focal_loss = use_focal_loss
+        self.focal_alpha = focal_alpha
+        self.focal_gamma = focal_gamma
 
         # Default XGBoost parameters
         self.default_params = {
@@ -124,6 +133,70 @@ class EngagementXGBoost:
         self.feature_names: Optional[List[str]] = None
         self.is_fitted = False
         self.is_calibrated = False
+
+    def _create_focal_loss_objective(
+        self, num_classes: int, alpha: float, gamma: float
+    ):
+        """
+        Create a focal loss objective function for XGBoost multi-class classification.
+
+        Focal loss down-weights easy examples (well-classified) and focuses on hard examples.
+        FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+
+        Args:
+            num_classes: Number of classes
+            alpha: Weighting factor for focal loss (default 0.25)
+            gamma: Focusing parameter for focal loss (default 2.0)
+
+        Returns:
+            objective: A callable that returns gradient and hessian
+        """
+
+        def focal_loss_objective(y_true: np.ndarray, y_pred: np.ndarray):
+            """
+            Focal loss objective for XGBClassifier.
+
+            Args:
+                y_true: True labels, shape (n_samples,)
+                y_pred: Raw predictions from XGBoost, shape (n_samples * n_classes,)
+
+            Returns:
+                grad: Gradient, shape (n_samples, n_classes) - XGBoost 2.1.0+ format
+                hess: Hessian, shape (n_samples, n_classes) - XGBoost 2.1.0+ format
+            """
+            labels = y_true.astype(int)
+            n_samples = len(labels)
+
+            # Reshape predictions to (n_samples, n_classes)
+            preds_matrix = y_pred.reshape(n_samples, num_classes)
+
+            # Apply softmax to get probabilities
+            max_preds = np.max(preds_matrix, axis=1, keepdims=True)
+            exp_preds = np.exp(preds_matrix - max_preds)  # Numerical stability
+            probs = exp_preds / np.sum(exp_preds, axis=1, keepdims=True)
+
+            # Create one-hot encoded labels
+            y_one_hot = np.zeros_like(probs)
+            y_one_hot[np.arange(n_samples), labels] = 1
+
+            # Compute p_t (probability of the correct class)
+            p_t = (probs * y_one_hot).sum(axis=1, keepdims=True)  # (n_samples, 1)
+            p_t = np.clip(p_t, 1e-8, 1.0 - 1e-8)  # Numerical stability
+
+            # Focal weight: (1 - p_t)^gamma
+            focal_weight = (1.0 - p_t) ** gamma
+
+            # Gradient for focal loss
+            # grad = alpha * focal_weight * (probs - y_one_hot)
+            grad = alpha * focal_weight * (probs - y_one_hot)
+
+            # Hessian (approximation)
+            hess = np.abs(alpha * focal_weight * probs * (1.0 - probs)) + 1e-6
+
+            # Return with shape (n_samples, n_classes) as required by XGBoost 2.1.0+
+            return grad.astype(np.float32), hess.astype(np.float32)
+
+        return focal_loss_objective
 
     def _compute_class_weights(self, y: np.ndarray) -> Dict[int, float]:
         """
@@ -262,6 +335,10 @@ class EngagementXGBoost:
             print(f"Feature dimension: {X.shape[1]}")
             print(f"Using GPU: {self.use_gpu}")
             print(f"SMOTE: {self.use_smote}")
+            print(f"Focal Loss: {self.use_focal_loss}")
+            if self.use_focal_loss:
+                print(f"  Focal alpha: {self.focal_alpha}")
+                print(f"  Focal gamma: {self.focal_gamma}")
             print(f"Calibration: {self.calibrate_probabilities}")
             print(f"Threshold optimization: {self.optimize_thresholds}")
 
@@ -314,20 +391,56 @@ class EngagementXGBoost:
                     )
 
             # Create model
-            model = xgb.XGBClassifier(
-                **params,
-                early_stopping_rounds=self.early_stopping_rounds
-                if X_val is not None
-                else None,
-            )
+            if self.use_focal_loss:
+                # Use focal loss custom objective
+                focal_obj = self._create_focal_loss_objective(
+                    num_classes=params.get("num_class", self.num_classes),
+                    alpha=self.focal_alpha,
+                    gamma=self.focal_gamma,
+                )
+                # Remove default objective and num_class from params
+                params_focal = {
+                    k: v
+                    for k, v in params.items()
+                    if k not in ["objective", "num_class"]
+                }
+                model = xgb.XGBClassifier(
+                    **params_focal,
+                    num_class=params.get("num_class", self.num_classes),
+                    objective=focal_obj,
+                    early_stopping_rounds=self.early_stopping_rounds
+                    if X_val is not None
+                    else None,
+                )
+            else:
+                model = xgb.XGBClassifier(
+                    **params,
+                    early_stopping_rounds=self.early_stopping_rounds
+                    if X_val is not None
+                    else None,
+                )
 
             # Prepare training arguments
-            sample_weights = np.array([class_weights[label] for label in y_train_state])
-            fit_args: Dict[str, Any] = {
-                "X": X_train_state,
-                "y": y_train_state,
-                "sample_weight": sample_weights,
-            }
+            # Note: When using focal loss, don't use sample_weight since focal loss
+            # already handles class imbalance via the focal weighting mechanism
+            if self.use_focal_loss:
+                if verbose:
+                    print(
+                        "  Note: Focal loss handles class imbalance - skipping sample weighting"
+                    )
+                fit_args: Dict[str, Any] = {
+                    "X": X_train_state,
+                    "y": y_train_state,
+                }
+            else:
+                sample_weights = np.array(
+                    [class_weights[label] for label in y_train_state]
+                )
+                fit_args: Dict[str, Any] = {
+                    "X": X_train_state,
+                    "y": y_train_state,
+                    "sample_weight": sample_weights,
+                }
 
             # Add validation set if provided
             if X_val is not None and y_val is not None:
@@ -725,11 +838,36 @@ class EngagementXGBoost:
             "use_smote": self.use_smote,
             "calibrate_probabilities": self.calibrate_probabilities,
             "optimize_thresholds": self.optimize_thresholds,
+            "use_focal_loss": self.use_focal_loss,
+            "focal_alpha": self.focal_alpha,
+            "focal_gamma": self.focal_gamma,
         }
 
         # Save calibrated models if present
         if self.is_calibrated:
             save_data["calibrated_models"] = self.calibrated_models
+
+        # Handle focal loss: Custom objectives can't be pickled
+        # We need to recreate models without the custom objective for pickling
+        if self.use_focal_loss:
+            # Temporarily replace custom objective with standard objective for saving
+            models_to_save = {}
+            for state, model in self.models.items():
+                if model is not None:
+                    # Get model params without the custom objective
+                    model_params = model.get_params()
+                    # Replace custom objective with standard multi:softprob
+                    model_params["objective"] = "multi:softprob"
+                    # Create a new model with standard objective
+                    import xgboost as xgb
+
+                    temp_model = xgb.XGBClassifier(**model_params)
+                    # Copy the booster from original model
+                    temp_model._Booster = model._Booster
+                    models_to_save[state] = temp_model
+                else:
+                    models_to_save[state] = None
+            save_data["models"] = models_to_save
 
         with open(filepath, "wb") as f:
             pickle.dump(save_data, f)
@@ -755,6 +893,9 @@ class EngagementXGBoost:
             use_smote=data.get("use_smote", False),
             calibrate_probabilities=data.get("calibrate_probabilities", False),
             optimize_thresholds=data.get("optimize_thresholds", False),
+            use_focal_loss=data.get("use_focal_loss", False),
+            focal_alpha=data.get("focal_alpha", 0.25),
+            focal_gamma=data.get("focal_gamma", 2.0),
             **data["default_params"],
         )
         model.models = data["models"]

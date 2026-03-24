@@ -532,13 +532,14 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
     imbalance_cfg = cfg.get("imbalance_handling", {})
     threshold_cfg = cfg.get("threshold_optimization", {})
     calib_cfg = cfg.get("calibration", {})
+    focal_cfg = cfg.get("focal_loss", {})
 
     engineer_features = fe_cfg.get("enabled", True)
 
     if engineer_features:
-        print("\nEngineering features for training set ...")
+        print("\nEngineering features for training set...")
         X_train_eng = engineer_dataset_features(X_train, feature_names, verbose=True)
-        print("Engineering features for validation set ...")
+        print("Engineering features for validation set...")
         X_val_eng = engineer_dataset_features(X_val, feature_names, verbose=False)
         print(f"Engineered feature dim: {X_train_eng.shape[1]}")
     else:
@@ -566,6 +567,11 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
     calibrate_probabilities = calib_cfg.get("enabled", True)
     calibration_method = calib_cfg.get("method", "isotonic")
 
+    # Focal Loss
+    use_focal_loss = focal_cfg.get("enabled", False)
+    focal_alpha = focal_cfg.get("alpha", 0.25)
+    focal_gamma = focal_cfg.get("gamma", 2.0)
+
     xgb_model = EngagementXGBoost(
         num_classes=model_cfg.get("num_classes", 4),
         use_gpu=model_cfg.get("use_gpu", False),
@@ -577,11 +583,17 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
         calibration_method=calibration_method,
         optimize_thresholds=optimize_thresholds,
         threshold_metric=threshold_metric,
+        use_focal_loss=use_focal_loss,
+        focal_alpha=focal_alpha,
+        focal_gamma=focal_gamma,
         **xgb_model_params,
     )
 
     print("\nTraining XGBoost model:")
     print(f"  SMOTE: {use_smote} (strategy={smote_strategy})")
+    print(f"  Focal Loss: {use_focal_loss}")
+    if use_focal_loss:
+        print(f"    alpha={focal_alpha}, gamma={focal_gamma}")
     print(f"  Calibration: {calibrate_probabilities}")
     print(f"  Threshold optimization: {optimize_thresholds}")
 
@@ -776,10 +788,19 @@ def train_ensemble(
         k: v for k, v in xgb_params.items() if k != "early_stopping_rounds"
     }
 
+    # Focal loss configuration for ensemble
+    focal_cfg = xgb_cfg.get("focal_loss", {})
+    use_focal_loss = focal_cfg.get("enabled", False)
+    focal_alpha = focal_cfg.get("alpha", 0.25)
+    focal_gamma = focal_cfg.get("gamma", 2.0)
+
     xgb_model = EngagementXGBoost(
         num_classes=xgb_cfg["model"].get("num_classes", 4),
         use_gpu=xgb_cfg["model"].get("use_gpu", False),
         early_stopping_rounds=early_stopping,
+        use_focal_loss=use_focal_loss,
+        focal_alpha=focal_alpha,
+        focal_gamma=focal_gamma,
         **xgb_model_params,
     )
     xgb_model.fit(

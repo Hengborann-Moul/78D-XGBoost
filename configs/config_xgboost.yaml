@@ -85,6 +85,12 @@ xgboost:
   verbosity: 0
   early_stopping_rounds: 50
 
+# --- Focal Loss (for class imbalance) ---
+focal_loss:
+  enabled: true        # Enable focal loss objective (recommended for imbalanced data)
+  alpha: 0.25          # Weighting factor (0.25 = slight down-weighting of easy examples)
+  gamma: 2.0           # Focusing parameter (2.0 = moderate focus on hard examples)
+
 # --- Evaluation ---
 evaluation:
   # Affective states to evaluate
