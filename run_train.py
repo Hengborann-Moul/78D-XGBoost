@@ -15,8 +15,8 @@ Author: Hengborann MOUL
 """
 
 import argparse
-import sys
 import pickle
+import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -36,32 +36,32 @@ sys.path.insert(0, str(SRC_DIR))
 # ---------------------------------------------------------------------------
 # Heavy imports after path setup
 # ---------------------------------------------------------------------------
-import torch
-import pandas as pd
 import matplotlib
+import pandas as pd
+import torch
 
 matplotlib.use("Agg")  # non-interactive backend
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import (
     accuracy_score,
-    f1_score,
+    auc,
     classification_report,
     confusion_matrix,
+    f1_score,
     roc_curve,
-    auc,
 )
-from sklearn.preprocessing import label_binarize
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import label_binarize
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
+from feature_engineering import FeatureEngineer, engineer_dataset_features
+from model.ensemble_model import EnsembleModel, optimal_weight_search
 from model.lstm_model import EngagementLSTM, MultiTaskLoss, get_model_summary
 from model.xgboost_model import EngagementXGBoost
-from model.ensemble_model import EnsembleModel, optimal_weight_search
 from normalization.feature_normalization import FeatureNormalizer
-from feature_engineering import FeatureEngineer, engineer_dataset_features
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -529,6 +529,9 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
     model_cfg = cfg["model"]
     xgb_cfg = cfg.get("xgboost", {})
     fe_cfg = cfg.get("feature_engineering", {})
+    imbalance_cfg = cfg.get("imbalance_handling", {})
+    threshold_cfg = cfg.get("threshold_optimization", {})
+    calib_cfg = cfg.get("calibration", {})
 
     engineer_features = fe_cfg.get("enabled", True)
 
@@ -550,12 +553,37 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
         k: v for k, v in xgb_cfg.items() if k != "early_stopping_rounds"
     }
 
+    # SMOTE and imbalance handling
+    use_smote = imbalance_cfg.get("enabled", True)
+    smote_strategy = imbalance_cfg.get("strategy", "smote")
+    smote_k_neighbors = imbalance_cfg.get("smote_k_neighbors", 5)
+
+    # Threshold optimization
+    optimize_thresholds = threshold_cfg.get("enabled", True)
+    threshold_metric = threshold_cfg.get("metric", "f1_macro")
+
+    # Calibration
+    calibrate_probabilities = calib_cfg.get("enabled", True)
+    calibration_method = calib_cfg.get("method", "isotonic")
+
     xgb_model = EngagementXGBoost(
         num_classes=model_cfg.get("num_classes", 4),
         use_gpu=model_cfg.get("use_gpu", False),
         early_stopping_rounds=early_stopping,
+        use_smote=use_smote,
+        smote_strategy=smote_strategy,
+        smote_k_neighbors=smote_k_neighbors,
+        calibrate_probabilities=calibrate_probabilities,
+        calibration_method=calibration_method,
+        optimize_thresholds=optimize_thresholds,
+        threshold_metric=threshold_metric,
         **xgb_model_params,
     )
+
+    print("\nTraining XGBoost model:")
+    print(f"  SMOTE: {use_smote} (strategy={smote_strategy})")
+    print(f"  Calibration: {calibrate_probabilities}")
+    print(f"  Threshold optimization: {optimize_thresholds}")
 
     xgb_model.fit(
         X_train_eng,
@@ -935,6 +963,7 @@ def evaluate_and_save(all_preds, all_probs, y_test, run_dir):
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
+
 
 def _ensure_plots_dir(run_dir: Path) -> Path:
     p = run_dir / "plots"

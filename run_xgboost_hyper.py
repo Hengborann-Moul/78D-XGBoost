@@ -5,6 +5,13 @@ Runs RandomizedSearchCV over the XGBoost search space for one or all
 affective states, then re-trains a final model using the best found params
 and evaluates it on the held-out test set.
 
+Improvements:
+- Feature selection (model-based, top 500)
+- SMOTE + class weights for imbalance handling
+- State-specific hyperparameters
+- Threshold optimization (per-state)
+- Probability calibration (separate calibration set)
+
 Usage:
     # Search all 4 states (default)
     python run_xgboost_hyper.py
@@ -20,14 +27,6 @@ Usage:
 
     # Skip retrain and plots (saves time / memory)
     python run_xgboost_hyper.py --no-retrain --no-plots
-
-Resource notes:
-    - --n-iter × --cv XGBoost fits are run per state.  With 4 states and
-      n_iter=50, cv=3 that is already 600 fits.  Keep n_iter ≤ 50 and cv ≤ 3
-      unless you have plenty of RAM.
-    - --n-jobs controls parallelism inside RandomizedSearchCV.  Defaults to
-      half the logical CPU count so the OS stays responsive.  Pass -1 only
-      if you are happy for the machine to be fully loaded.
 
 Output structure:
     outputs_v2/xgboost_hyper/{timestamp}/
@@ -72,27 +71,27 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
-
 from sklearn.metrics import (
     accuracy_score,
+    auc,
     classification_report,
     confusion_matrix,
     f1_score,
     roc_curve,
-    auc,
 )
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import label_binarize
 
-from feature_engineering import engineer_dataset_features
+from feature_engineering import FeatureEngineer, engineer_dataset_features
 from model.xgboost_model import EngagementXGBoost, hyperparameter_search
 from normalization.feature_normalization import FeatureNormalizer
+from preprocessing.feature_selector import MultiTaskFeatureSelector
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 AFFECTIVE_STATES = ["boredom", "engagement", "confusion", "frustration"]
-CLASS_NAMES = ["Low", "Medium", "High", "Very High"]
+CLASS_NAMES = ["Low", "Medium", "High"]
 
 # Safe default: use half the logical CPU count so the OS stays responsive.
 _DEFAULT_N_JOBS = max(1, math.floor((os.cpu_count() or 2) / 2))
@@ -146,19 +145,23 @@ def parse_args() -> argparse.Namespace:
             "Pass -1 to use all cores (may cause OOM on large datasets)."
         ),
     )
-    # FIX: store_true with default=False so the flags actually do something
-    # when passed.  Previously both defaulted to True, making them no-ops.
     parser.add_argument(
         "--no-retrain",
         action="store_true",
         default=False,
-        help="Skip final re-training with best params; only report search results.",
+        help="Skip final model training and evaluation.",
     )
     parser.add_argument(
         "--no-plots",
         action="store_true",
         default=False,
         help="Skip saving confusion matrix and ROC plots.",
+    )
+    parser.add_argument(
+        "--skip-feature-selection",
+        action="store_true",
+        default=False,
+        help="Skip feature selection and use all features.",
     )
     return parser.parse_args()
 
@@ -171,7 +174,7 @@ def parse_args() -> argparse.Namespace:
 def load_config(config_arg: str) -> dict:
     config_path = Path(config_arg)
     if not config_path.is_absolute():
-        config_path = PROJECT_ROOT / config_path
+        config_path = PROJECT_ROOT / config_arg
 
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -221,7 +224,7 @@ def save_config_copy(cfg: dict, run_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Data helpers  (mirrors run_train.py exactly)
+# Data helpers
 # ---------------------------------------------------------------------------
 
 
@@ -264,44 +267,97 @@ def load_dataset(cfg: dict):
     return X, y, feature_names
 
 
-def split_dataset(X, y, cfg):
-    """Stratified train / val / test split (same logic as run_train.py)."""
+def split_dataset(X, y, cfg, calibration_ratio=0.15):
+    """
+    Stratified train / val / test / calibration split.
+
+    Returns:
+        X_train, y_train, X_val, y_val, X_calib, y_calib, X_test, y_test
+    """
     data_cfg = cfg["data"]
     seed = data_cfg.get("random_seed", 42)
     val_ratio = data_cfg.get("val_ratio", 0.15)
     test_ratio = data_cfg.get("test_ratio", 0.15)
 
+    # Calibration config
+    calib_cfg = cfg.get("calibration", {})
+    calib_enabled = calib_cfg.get("enabled", True)
+    calib_ratio = calib_cfg.get("calibration_ratio", calibration_ratio)
+
     stratify_label = y["engagement"]
 
+    # First split: train vs (val + test + calib)
     X_train, X_tmp, idx_train, idx_tmp = train_test_split(
         X,
         np.arange(len(X)),
-        test_size=val_ratio + test_ratio,
+        test_size=val_ratio + test_ratio + (calib_ratio if calib_enabled else 0),
         random_state=seed,
         stratify=stratify_label,
     )
     y_train = {s: y[s][idx_train] for s in AFFECTIVE_STATES}
 
-    relative_test = test_ratio / (val_ratio + test_ratio)
-    X_val, X_test, idx_val, idx_test = train_test_split(
-        X_tmp,
-        idx_tmp,
-        test_size=relative_test,
-        random_state=seed,
-        stratify=stratify_label[idx_tmp],
+    # Second split: temp splits
+    remaining_ratio = val_ratio + test_ratio + (calib_ratio if calib_enabled else 0)
+    relative_val = val_ratio / remaining_ratio if remaining_ratio > 0 else 0
+    relative_test = test_ratio / remaining_ratio if remaining_ratio > 0 else 0
+    relative_calib = calib_ratio / remaining_ratio if remaining_ratio > 0 else 0
+
+    # Adjust for proper splits
+    if calib_enabled:
+        # Split tmp into val / test / calib
+        relative_test_in_tmp = test_ratio / (val_ratio + test_ratio + calib_ratio)
+        relative_calib_in_tmp = calib_ratio / (val_ratio + test_ratio + calib_ratio)
+
+        X_val, X_remain, idx_val, idx_remain = train_test_split(
+            X_tmp,
+            idx_tmp,
+            test_size=(1 - relative_val),
+            random_state=seed,
+            stratify=stratify_label[idx_tmp],
+        )
+
+        # Split remaining into test and calib
+        relative_test_in_remain = test_ratio / (test_ratio + calib_ratio)
+        X_test, X_calib, idx_test, idx_calib = train_test_split(
+            X_remain,
+            idx_remain,
+            test_size=(1 - relative_test_in_remain),
+            random_state=seed,
+            stratify=stratify_label[idx_remain],
+        )
+
+        y_val = {s: y[s][idx_val] for s in AFFECTIVE_STATES}
+        y_test = {s: y[s][idx_test] for s in AFFECTIVE_STATES}
+        y_calib = {s: y[s][idx_calib] for s in AFFECTIVE_STATES}
+    else:
+        # Standard 3-way split without calibration set
+        relative_test = test_ratio / (val_ratio + test_ratio)
+        X_val, X_test, idx_val, idx_test = train_test_split(
+            X_tmp,
+            idx_tmp,
+            test_size=relative_test,
+            random_state=seed,
+            stratify=stratify_label[idx_tmp],
+        )
+        y_val = {s: y[s][idx_val] for s in AFFECTIVE_STATES}
+        y_test = {s: y[s][idx_test] for s in AFFECTIVE_STATES}
+        X_calib, y_calib = None, None
+
+    split_info = (
+        f"\nSplit -> train={len(X_train)}  val={len(X_val)}  test={len(X_test)}"
     )
-    y_val = {s: y[s][idx_val] for s in AFFECTIVE_STATES}
-    y_test = {s: y[s][idx_test] for s in AFFECTIVE_STATES}
+    if calib_enabled and X_calib is not None:
+        split_info += f"  calib={len(X_calib)}"
+    print(split_info)
 
-    print(f"\nSplit -> train={len(X_train)}  val={len(X_val)}  test={len(X_test)}")
-    return X_train, y_train, X_val, y_val, X_test, y_test
+    return X_train, y_train, X_val, y_val, X_calib, y_calib, X_test, y_test
 
 
-def normalize_data(X_train, X_val, X_test, cfg, run_dir, feature_names):
+def normalize_data(X_train, X_val, X_test, X_calib, cfg, run_dir, feature_names):
     norm_cfg = cfg.get("normalization", {})
     if not norm_cfg.get("enabled", True):
         print("Normalization disabled.")
-        return X_train, X_val, X_test, None
+        return X_train, X_val, X_test, X_calib, None
 
     strategy = norm_cfg.get("strategy", "mixed")
     print(f"\nNormalizing features (strategy={strategy}) ...")
@@ -313,37 +369,107 @@ def normalize_data(X_train, X_val, X_test, cfg, run_dir, feature_names):
     X_train = normalizer.fit_transform(X_train, verbose=True)
     X_val = normalizer.transform(X_val)
     X_test = normalizer.transform(X_test)
+    if X_calib is not None:
+        X_calib = normalizer.transform(X_calib)
 
     normalizer.save(str(run_dir / "checkpoints" / "normalizer.pkl"))
-    return X_train, X_val, X_test, normalizer
+    return X_train, X_val, X_test, X_calib, normalizer
 
 
-def engineer_features_split(X_train, X_val, X_test, cfg, feature_names):
+def engineer_features_split(X_train, X_val, X_test, X_calib, cfg, feature_names):
     """
-    Apply feature engineering to all three splits.
-    Returns (X_train_eng, X_val_eng, X_test_eng).
+    Apply feature engineering to all splits.
+    Returns (X_train_eng, X_val_eng, X_test_eng, X_calib_eng, engineered_feature_names).
     """
     fe_cfg = cfg.get("feature_engineering", {})
 
     if fe_cfg.get("enabled", True):
+        # Create feature engineer to get feature names
+        engineer = FeatureEngineer(feature_names)
+        engineered_names = engineer.get_engineered_feature_names()
+
         print("\nEngineering features — train ...")
         X_train_eng = engineer_dataset_features(X_train, feature_names, verbose=True)
         print("Engineering features — val ...")
         X_val_eng = engineer_dataset_features(X_val, feature_names, verbose=False)
         print("Engineering features — test ...")
         X_test_eng = engineer_dataset_features(X_test, feature_names, verbose=False)
+        if X_calib is not None:
+            print("Engineering features — calib ...")
+            X_calib_eng = engineer_dataset_features(
+                X_calib, feature_names, verbose=False
+            )
+        else:
+            X_calib_eng = None
         print(f"Engineered feature dim : {X_train_eng.shape[1]}")
+        print(f"Engineered feature names: {len(engineered_names)}")
     else:
         print("\nFeature engineering disabled — flattening sequences.")
         X_train_eng = X_train.reshape(len(X_train), -1)
         X_val_eng = X_val.reshape(len(X_val), -1)
         X_test_eng = X_test.reshape(len(X_test), -1)
+        X_calib_eng = X_calib.reshape(len(X_calib), -1) if X_calib is not None else None
+        engineered_names = [f"feature_{i}" for i in range(X_train_eng.shape[1])]
 
-    return X_train_eng, X_val_eng, X_test_eng
+    return X_train_eng, X_val_eng, X_test_eng, X_calib_eng, engineered_names
+
+
+def apply_feature_selection(
+    X_train,
+    X_val,
+    X_test,
+    X_calib,
+    y_train,
+    feature_names,
+    cfg,
+    run_dir,
+    skip_selection=False,
+):
+    """
+    Apply model-based feature selection.
+    """
+    fs_cfg = cfg.get("feature_selection", {})
+
+    if not fs_cfg.get("enabled", True) or skip_selection:
+        print("\nFeature selection disabled.")
+        return X_train, X_val, X_test, X_calib, None
+
+    k_features = fs_cfg.get("k_features", 500)
+    aggregation = fs_cfg.get("aggregation", "mean_rank")
+
+    print(f"\n{'=' * 70}")
+    print("FEATURE SELECTION")
+    print(f"{'=' * 70}")
+    print(f"Selecting top {k_features} features using {aggregation} aggregation")
+
+    selector = MultiTaskFeatureSelector(
+        k_features=k_features,
+        aggregation=aggregation,
+        random_state=42,
+    )
+
+    X_train_sel = selector.fit_transform(X_train, y_train, feature_names, verbose=True)
+    X_val_sel = selector.transform(X_val)
+    X_test_sel = selector.transform(X_test)
+    X_calib_sel = selector.transform(X_calib) if X_calib is not None else None
+
+    # Save selector
+    selector_path = run_dir / "checkpoints" / "feature_selector.pkl"
+    selector.save(str(selector_path))
+
+    # Save importance report
+    report = selector.get_importance_report()
+    report.to_csv(run_dir / "results" / "feature_importance.csv", index=False)
+
+    print("\nFeature selection complete:")
+    print(f"  Original features: {X_train.shape[1]}")
+    print(f"  Selected features: {X_train_sel.shape[1]}")
+
+    return X_train_sel, X_val_sel, X_test_sel, X_calib_sel, selector
 
 
 # ---------------------------------------------------------------------------
-# Search: run for one or all states
+# Hyperparameter search
 # ---------------------------------------------------------------------------
 
 
@@ -361,16 +487,12 @@ def run_search_for_states(
 ) -> dict:
     """
     Run hyperparameter_search() for each requested state sequentially.
-
-    States are searched one at a time (not in parallel) to avoid
-    over-committing CPU/RAM.  Parallelism is controlled per-search via
-    n_jobs, which defaults to half the logical CPU count.
-
-    Returns:
-        all_best_params : dict[state -> best_params_dict]
     """
     all_best_params = {}
     results_dir = run_dir / "results"
+
+    imbalance_cfg = cfg.get("imbalance_handling", {})
+    use_smote = imbalance_cfg.get("enabled", True)
 
     for state in states_to_search:
         print(
@@ -389,20 +511,17 @@ def run_search_for_states(
             cv=cv,
             n_jobs=n_jobs,
             cfg=cfg,
+            use_smote=use_smote,
         )
         all_best_params[state] = best_params
 
-        # Persist best params as JSON immediately after each state so results
-        # are not lost if a later state crashes.
         params_path = results_dir / f"{state}_best_params.json"
         with open(params_path, "w") as f:
             json.dump(best_params, f, indent=2)
         print(f"✓ Best params saved to {params_path}")
 
-        # Release any memory held by sklearn/xgboost internals between states.
         gc.collect()
 
-    # Combined summary table
     summary_rows = [
         {"state": state, **params} for state, params in all_best_params.items()
     ]
@@ -413,7 +532,7 @@ def run_search_for_states(
 
 
 # ---------------------------------------------------------------------------
-# Re-train final model with best params
+# Re-train final model with best params (STATE-SPECIFIC)
 # ---------------------------------------------------------------------------
 
 
@@ -424,77 +543,109 @@ def retrain_with_best_params(
     y_train: dict,
     X_val_eng: np.ndarray,
     y_val: dict,
+    X_calib_eng: np.ndarray,
+    y_calib: dict,
     cfg: dict,
     run_dir: Path,
+    feature_names=None,
 ) -> EngagementXGBoost:
     """
-    Build a single EngagementXGBoost instance.
+    Build and train model with state-specific hyperparameters.
 
-    Strategy:
-    - If we searched all 4 states, use the params from 'engagement' (most
-      representative) as the shared base — since EngagementXGBoost uses one
-      shared param set across states.
-    - If only one state was searched, use those params directly.
-    - Any states NOT searched fall back to config defaults.
-
-    The model is trained on train+val combined for maximum data efficiency
-    before final test evaluation.
+    Key improvements:
+    - Each state uses its own best hyperparameters
+    - SMOTE + class weights for imbalance handling
+    - Threshold optimization on validation set
+    - Probability calibration on separate calibration set
     """
     print("\n" + "=" * 80)
-    print("RE-TRAINING FINAL MODEL WITH BEST HYPERPARAMETERS")
+    print("RE-TRAINING FINAL MODEL WITH STATE-SPECIFIC HYPERPARAMETERS")
     print("=" * 80)
 
     model_cfg = cfg.get("model", {})
     xgb_cfg = cfg.get("xgboost", {})
+    imbalance_cfg = cfg.get("imbalance_handling", {})
+    threshold_cfg = cfg.get("threshold_optimization", {})
+    calib_cfg = cfg.get("calibration", {})
 
-    # Pick the representative best params
-    # Priority: engagement > first searched state
-    representative_state = (
-        "engagement" if "engagement" in all_best_params else states_to_search[0]
-    )
-    best = all_best_params[representative_state]
+    # Build state-specific params
+    state_params = {}
+    for state in AFFECTIVE_STATES:
+        if state in all_best_params:
+            state_params[state] = all_best_params[state].copy()
+        else:
+            # Use defaults from config
+            state_params[state] = {
+                k: v
+                for k, v in xgb_cfg.items()
+                if k not in ("early_stopping_rounds", "objective", "num_class")
+            }
 
-    print(f"\nUsing best params from '{representative_state}' as shared base:")
-    for k, v in best.items():
-        print(f"  {k:25s}: {v}")
+    print("\nState-specific hyperparameters:")
+    for state, params in state_params.items():
+        print(
+            f"  {state}: max_depth={params.get('max_depth', 'N/A')}, "
+            f"lr={params.get('learning_rate', 'N/A')}, "
+            f"n_est={params.get('n_estimators', 'N/A')}"
+        )
 
-    # Build constructor kwargs — merge config defaults then overlay best params
+    # Create model with improvement settings
     early_stopping = xgb_cfg.get("early_stopping_rounds", 50)
-    constructor_kwargs = {
-        k: v
-        for k, v in xgb_cfg.items()
-        if k not in ("early_stopping_rounds", "objective", "num_class")
-    }
-    constructor_kwargs.update(best)
+    use_smote = imbalance_cfg.get("enabled", True)
+    calibrate = calib_cfg.get("enabled", True) and X_calib_eng is not None
+    optimize_thresh = threshold_cfg.get("enabled", True)
 
     model = EngagementXGBoost(
-        num_classes=model_cfg.get("num_classes", 4),
+        num_classes=model_cfg.get("num_classes", 3),
         use_gpu=model_cfg.get("use_gpu", False),
         early_stopping_rounds=early_stopping,
-        **constructor_kwargs,
+        use_smote=use_smote,
+        smote_strategy=imbalance_cfg.get("strategy", "auto"),
+        smote_k_neighbors=imbalance_cfg.get("smote_k_neighbors", 5),
+        calibrate_probabilities=calibrate,
+        calibration_method=calib_cfg.get("method", "isotonic"),
+        optimize_thresholds=optimize_thresh,
+        threshold_metric=threshold_cfg.get("metric", "f1_macro"),
+        random_state=xgb_cfg.get("random_state", 42),
+        n_jobs=xgb_cfg.get("n_jobs", -1),
     )
 
-    # Combine train + val for final fit
-    X_combined = np.concatenate([X_train_eng, X_val_eng], axis=0)
-    y_combined = {
-        s: np.concatenate([y_train[s], y_val[s]], axis=0) for s in AFFECTIVE_STATES
-    }
-
-    print(f"\nFinal training on {X_combined.shape[0]} samples (train + val combined)")
+    # Train model
+    print(f"\nTraining on {X_train_eng.shape[0]} samples")
+    print(f"  SMOTE: {use_smote}")
+    print(f"  Calibration: {calibrate}")
+    print(f"  Threshold optimization: {optimize_thresh}")
 
     model.fit(
-        X_combined,
-        y_combined,
-        X_val=None,  # no early stopping when using combined data
-        y_val=None,
-        feature_names=None,
+        X_train_eng,
+        y_train,
+        X_val=X_val_eng,
+        y_val=y_val,
+        X_calib=X_calib_eng,
+        y_calib=y_calib,
+        feature_names=feature_names,
         verbose=True,
+        state_specific_params=state_params,
     )
 
-    # Save
+    # Save model
     ckpt_path = run_dir / "checkpoints" / "best_model.pkl"
     model.save(str(ckpt_path))
     print(f"✓ Final model saved to {ckpt_path}")
+
+    # Save thresholds
+    if optimize_thresh and model.thresholds:
+        thresholds_path = run_dir / "checkpoints" / "thresholds.json"
+        with open(thresholds_path, "w") as f:
+            json.dump(
+                {
+                    s: {str(k): v for k, v in t.items()}
+                    for s, t in model.thresholds.items()
+                },
+                f,
+                indent=2,
+            )
+        print(f"✓ Thresholds saved to {thresholds_path}")
 
     return model
 
@@ -509,22 +660,17 @@ def evaluate_on_test(
     X_test_eng: np.ndarray,
     y_test: dict,
     run_dir: Path,
+    use_thresholds: bool = True,
 ) -> tuple:
     """
-    Run predictions on test set once, compute metrics, save CSVs.
-
-    Returns:
-        summary_df  : pd.DataFrame with per-state + mean metrics
-        all_preds   : dict[state -> np.ndarray]  (reused by plot helpers)
-        all_probs   : dict[state -> np.ndarray]  (reused by plot helpers)
+    Run predictions on test set, compute metrics, save CSVs.
     """
     print("\n" + "=" * 80)
     print("EVALUATION ON TEST SET")
     print("=" * 80)
+    print(f"Using optimized thresholds: {use_thresholds}")
 
-    # Run inference exactly ONCE and reuse the results for everything below
-    # (and pass them back to the caller so plots don't need another forward pass).
-    all_preds = model.predict(X_test_eng)
+    all_preds = model.predict(X_test_eng, use_thresholds=use_thresholds)
     all_probs = model.predict_proba(X_test_eng)
 
     summary_rows = []
@@ -532,18 +678,16 @@ def evaluate_on_test(
     for state in AFFECTIVE_STATES:
         y_true = np.array(y_test[state])
         y_pred = np.array(all_preds[state])
-        y_prob = np.array(all_probs[state])  # (N, num_classes)
+        y_prob = np.array(all_probs[state])
 
         state_dir = run_dir / "evaluation" / state
 
-        # Save raw arrays
         np.save(state_dir / "test_predictions.npy", y_pred)
         np.save(state_dir / "test_probabilities.npy", y_prob)
 
-        # Scalar metrics
         acc = accuracy_score(y_true, y_pred)
-        f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=np.nan)  # type: ignore[arg-type]
-        f1_weighted = f1_score(y_true, y_pred, average="weighted", zero_division=np.nan)  # type: ignore[arg-type]
+        f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
+        f1_weighted = f1_score(y_true, y_pred, average="weighted", zero_division=0)
 
         pd.DataFrame(
             [
@@ -556,16 +700,19 @@ def evaluate_on_test(
             ]
         ).to_csv(state_dir / "test_metrics.csv", index=False)
 
-        # Classification report
         present_labels = sorted(np.unique(np.concatenate([y_true, y_pred])))
-        target_names = [CLASS_NAMES[i] for i in present_labels]
+        target_names = [
+            CLASS_NAMES[i] if i < len(CLASS_NAMES) else f"Class_{i}"
+            for i in present_labels
+        ]
+
         report_dict = classification_report(
             y_true,
             y_pred,
             labels=present_labels,
             target_names=target_names,
             output_dict=True,
-            zero_division=np.nan,  # type: ignore[arg-type]
+            zero_division=0,
         )
         pd.DataFrame(report_dict).transpose().to_csv(
             state_dir / "classification_report.csv"
@@ -601,9 +748,6 @@ def evaluate_on_test(
 
 # ---------------------------------------------------------------------------
 # Plots
-# NOTE: all plot functions now accept pre-computed predictions/probabilities
-#       instead of re-running inference on the model, avoiding redundant
-#       full-dataset forward passes.
 # ---------------------------------------------------------------------------
 
 
@@ -612,14 +756,7 @@ def plot_confusion_matrices(
     y_test: dict,
     run_dir: Path,
 ) -> None:
-    """
-    Plot normalised confusion matrices.
-
-    Args:
-        all_preds : pre-computed predictions from evaluate_on_test()
-        y_test    : ground-truth label dict
-        run_dir   : run output root
-    """
+    """Plot normalized confusion matrices."""
     plots_dir = run_dir / "plots"
 
     for state in AFFECTIVE_STATES:
@@ -627,7 +764,9 @@ def plot_confusion_matrices(
         y_pred = np.array(all_preds[state])
 
         present = sorted(np.unique(np.concatenate([y_true, y_pred])))
-        labels = [CLASS_NAMES[i] for i in present]
+        labels = [
+            CLASS_NAMES[i] if i < len(CLASS_NAMES) else f"Class_{i}" for i in present
+        ]
 
         cm = confusion_matrix(y_true, y_pred, labels=present)
         cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True).clip(min=1e-9)
@@ -642,7 +781,7 @@ def plot_confusion_matrices(
             yticklabels=labels,
             ax=ax,
         )
-        ax.set_title(f"Confusion Matrix — {state.capitalize()} (best params)")
+        ax.set_title(f"Confusion Matrix — {state.capitalize()}")
         ax.set_xlabel("Predicted")
         ax.set_ylabel("True")
         fig.tight_layout()
@@ -657,35 +796,39 @@ def plot_roc_curves(
     y_test: dict,
     run_dir: Path,
 ) -> None:
-    """
-    Plot one-vs-rest ROC curves for each affective state.
-
-    Args:
-        all_probs : pre-computed probabilities from evaluate_on_test()
-        y_test    : ground-truth label dict
-        run_dir   : run output root
-    """
+    """Plot one-vs-rest ROC curves for each affective state."""
     plots_dir = run_dir / "plots"
-    n_classes = 4
     colors = ["steelblue", "tomato", "seagreen", "darkorange"]
 
     for state in AFFECTIVE_STATES:
         y_true = np.array(y_test[state])
         y_prob = np.array(all_probs[state])
 
-        y_bin = label_binarize(y_true, classes=list(range(n_classes)))
+        present_classes = sorted(np.unique(y_true))
+        n_classes = len(present_classes)
+
+        y_bin = label_binarize(y_true, classes=present_classes)
 
         fig, ax = plt.subplots(figsize=(8, 6))
 
-        for i, (cls_name, color) in enumerate(zip(CLASS_NAMES, colors)):
+        for i, cls_idx in enumerate(present_classes):
             if y_bin.shape[1] <= i or y_prob.shape[1] <= i:
                 continue
             if len(np.unique(y_bin[:, i])) < 2:
                 continue
             fpr, tpr, _ = roc_curve(y_bin[:, i], y_prob[:, i])
             roc_auc = auc(fpr, tpr)
+            cls_name = (
+                CLASS_NAMES[cls_idx]
+                if cls_idx < len(CLASS_NAMES)
+                else f"Class_{cls_idx}"
+            )
             ax.plot(
-                fpr, tpr, color=color, lw=2, label=f"{cls_name} (AUC={roc_auc:.3f})"
+                fpr,
+                tpr,
+                color=colors[i % len(colors)],
+                lw=2,
+                label=f"{cls_name} (AUC={roc_auc:.3f})",
             )
 
         ax.plot([0, 1], [0, 1], "k--", lw=1)
@@ -693,7 +836,7 @@ def plot_roc_curves(
         ax.set_ylim(0.0, 1.05)
         ax.set_xlabel("False Positive Rate")
         ax.set_ylabel("True Positive Rate")
-        ax.set_title(f"ROC Curves — {state.capitalize()} (best params)")
+        ax.set_title(f"ROC Curves — {state.capitalize()}")
         ax.legend(loc="lower right")
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
@@ -707,13 +850,9 @@ def plot_param_comparison(
     all_best_params: dict,
     run_dir: Path,
 ) -> None:
-    """
-    Bar chart comparing the best hyperparameter values across all searched
-    states — useful for spotting whether states need very different tuning.
-    """
+    """Bar chart comparing hyperparameters across states."""
     plots_dir = run_dir / "plots"
 
-    # Numeric params only
     numeric_keys = [
         "max_depth",
         "learning_rate",
@@ -752,7 +891,6 @@ def plot_param_comparison(
         ax.tick_params(axis="x", rotation=15)
         ax.grid(True, axis="y", alpha=0.3)
 
-    # Hide any unused subplots
     for ax_idx in range(len(numeric_keys), len(axes_flat)):
         axes_flat[ax_idx].set_visible(False)
 
@@ -781,54 +919,73 @@ def main():
     print(f"  Total fits (per state) : {args.n_iter * args.cv}")
     print("=" * 70)
 
-    # ── Config ──────────────────────────────────────────────────────────────
+    # Load config
     cfg = load_config(args.config)
 
-    # ── Output dirs ─────────────────────────────────────────────────────────
+    # Output dirs
     run_dir = make_output_dirs(cfg)
     save_config_copy(cfg, run_dir)
 
-    # ── Data ────────────────────────────────────────────────────────────────
+    # Load data
     print("\n" + "=" * 70)
     print("LOADING DATA")
     print("=" * 70)
     X, y, feature_names = load_dataset(cfg)
 
-    X_train, y_train, X_val, y_val, X_test, y_test = split_dataset(X, y, cfg)
+    # Split dataset (with calibration set)
+    X_train, y_train, X_val, y_val, X_calib, y_calib, X_test, y_test = split_dataset(
+        X, y, cfg
+    )
 
-    # Free the raw full-dataset array as soon as the split is done.
+    # Free raw data
     del X
     gc.collect()
 
-    X_train, X_val, X_test, _normalizer = normalize_data(
-        X_train, X_val, X_test, cfg, run_dir, feature_names
+    # Normalize
+    X_train, X_val, X_test, X_calib, _normalizer = normalize_data(
+        X_train, X_val, X_test, X_calib, cfg, run_dir, feature_names
     )
 
-    # ── Feature engineering ─────────────────────────────────────────────────
+    # Feature engineering
     print("\n" + "=" * 70)
     print("FEATURE ENGINEERING")
     print("=" * 70)
-    X_train_eng, X_val_eng, X_test_eng = engineer_features_split(
-        X_train, X_val, X_test, cfg, feature_names
+    X_train_eng, X_val_eng, X_test_eng, X_calib_eng, engineered_names = (
+        engineer_features_split(X_train, X_val, X_test, X_calib, cfg, feature_names)
     )
 
-    # Release the pre-engineering arrays; the engineered ones are what we need.
-    del X_train, X_val, X_test
+    # Free pre-engineering arrays
+    del X_train, X_val, X_test, X_calib
     gc.collect()
 
-    # ── Determine which states to search ────────────────────────────────────
+    # Feature selection
+    X_train_sel, X_val_sel, X_test_sel, X_calib_sel, _selector = (
+        apply_feature_selection(
+            X_train_eng,
+            X_val_eng,
+            X_test_eng,
+            X_calib_eng,
+            y_train,
+            engineered_names,
+            cfg,
+            run_dir,
+            skip_selection=args.skip_feature_selection,
+        )
+    )
+
+    # Determine which states to search
     states_to_search = AFFECTIVE_STATES if args.state == "all" else [args.state]
     print(f"\nStates to search : {states_to_search}")
 
-    # ── Hyperparameter search ────────────────────────────────────────────────
+    # Hyperparameter search
     print("\n" + "=" * 70)
     print("HYPERPARAMETER SEARCH")
     print("=" * 70)
     all_best_params = run_search_for_states(
         states_to_search=states_to_search,
-        X_train_eng=X_train_eng,
+        X_train_eng=X_train_sel,
         y_train=y_train,
-        X_val_eng=X_val_eng,
+        X_val_eng=X_val_sel,
         y_val=y_val,
         cfg=cfg,
         n_iter=args.n_iter,
@@ -837,36 +994,38 @@ def main():
         run_dir=run_dir,
     )
 
-    # ── Parameter comparison plot ────────────────────────────────────────────
+    # Parameter comparison plot
     if not args.no_plots and len(all_best_params) > 1:
         plot_param_comparison(all_best_params, run_dir)
 
-    # ── Re-train & evaluate ──────────────────────────────────────────────────
+    # Re-train & evaluate
     if not args.no_retrain:
         best_model = retrain_with_best_params(
             all_best_params=all_best_params,
             states_to_search=states_to_search,
-            X_train_eng=X_train_eng,
+            X_train_eng=X_train_sel,
             y_train=y_train,
-            X_val_eng=X_val_eng,
+            X_val_eng=X_val_sel,
             y_val=y_val,
+            X_calib_eng=X_calib_sel,
+            y_calib=y_calib,
             cfg=cfg,
             run_dir=run_dir,
+            feature_names=feature_names,
         )
 
-        # Single inference pass — results are shared with plot helpers.
+        # Evaluate
         summary_df, all_preds, all_probs = evaluate_on_test(
-            best_model, X_test_eng, y_test, run_dir
+            best_model, X_test_sel, y_test, run_dir, use_thresholds=True
         )
 
         if not args.no_plots:
-            # Plots consume the already-computed dicts; no extra forward passes.
             plot_confusion_matrices(all_preds, y_test, run_dir)
             plot_roc_curves(all_probs, y_test, run_dir)
     else:
         print("\n[--no-retrain] Skipping final model training and evaluation.")
 
-    # ── Wrap up ──────────────────────────────────────────────────────────────
+    # Wrap up
     update_latest_symlink(run_dir)
 
     print("\n" + "=" * 70)

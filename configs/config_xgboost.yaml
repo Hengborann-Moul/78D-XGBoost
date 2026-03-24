@@ -34,6 +34,34 @@ feature_engineering:
   include_interaction:  true
   include_domain:       true
 
+# --- Feature Selection ---
+feature_selection:
+  enabled: true
+  k_features: 500
+  aggregation: "mean_rank"  # options: mean_rank | mean_score | max_score | sum_score
+
+# --- Class Imbalance Handling ---
+imbalance_handling:
+  enabled: true
+  strategy: "smote"            # Use SMOTE for minority class oversampling
+  smote_k_neighbors: 5
+  smote_random_state: 42
+
+# --- Threshold Optimization ---
+threshold_optimization:
+  enabled: true
+  metric: "f1_macro"
+  search_range_min: 0.2
+  search_range_max: 0.8
+  search_steps: 20
+
+# --- Probability Calibration ---
+calibration:
+  enabled: true
+  method: "isotonic"      # options: isotonic | sigmoid
+  use_calibration_set: true
+  calibration_ratio: 0.15  # held out from training for calibration
+
 # --- Model ---
 model:
   name: "xgboost"

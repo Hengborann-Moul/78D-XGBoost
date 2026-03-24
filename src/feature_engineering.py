@@ -13,13 +13,28 @@ Author: Hengborann MOUL
 Date: 2026-03-03
 """
 
+import warnings
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
-from scipy import stats, signal
+from scipy import signal, stats
 from scipy.fft import fft, fftfreq
 from sklearn.decomposition import PCA
-import warnings
+
+
+def _clean_features(features: np.ndarray) -> np.ndarray:
+    """
+    Replace NaN and Inf values with 0.
+
+    Args:
+        features: Feature array
+
+    Returns:
+        Cleaned feature array with NaN/Inf replaced by 0
+    """
+    features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+    return features.astype(np.float32)
 
 
 class FeatureEngineer:
@@ -140,7 +155,8 @@ class FeatureEngineer:
 
         # Flatten all features into single vector
         all_features = np.concatenate([v for v in features.values()])
-        features["all"] = all_features
+        # Final cleaning to ensure no NaN/Inf values
+        features["all"] = _clean_features(all_features)
 
         return features
 
@@ -183,7 +199,7 @@ class FeatureEngineer:
             except:
                 features.extend([0.0, 0.0])
 
-        return np.array(features, dtype=np.float32)
+        return _clean_features(np.array(features, dtype=np.float32))
 
     def _compute_temporal_features(self, sequence: np.ndarray) -> np.ndarray:
         """
@@ -250,7 +266,7 @@ class FeatureEngineer:
                 ]
             )
 
-        return np.array(features, dtype=np.float32)
+        return _clean_features(np.array(features, dtype=np.float32))
 
     def _compute_frequency_features(self, sequence: np.ndarray) -> np.ndarray:
         """
@@ -327,7 +343,7 @@ class FeatureEngineer:
                 ]
             )
 
-        return np.array(features, dtype=np.float32)
+        return _clean_features(np.array(features, dtype=np.float32))
 
     def _compute_interaction_features(self, sequence: np.ndarray) -> np.ndarray:
         """
@@ -401,7 +417,7 @@ class FeatureEngineer:
         smile_asymmetry = abs(left_smile - right_smile)
         features.append(smile_asymmetry)
 
-        return np.array(features, dtype=np.float32)
+        return _clean_features(np.array(features, dtype=np.float32))
 
     def _compute_domain_features(self, sequence: np.ndarray) -> np.ndarray:
         """
@@ -554,7 +570,7 @@ class FeatureEngineer:
             micro_expression_count += micro_expressions
         features.append(micro_expression_count / (len(sequence) * 52))
 
-        return np.array(features, dtype=np.float32)
+        return _clean_features(np.array(features, dtype=np.float32))
 
     def get_engineered_feature_names(self) -> List[str]:
         """
@@ -720,7 +736,11 @@ def engineer_dataset_features(
         feat = engineer.engineer_features(sequences[i])
         engineered_features.append(feat["all"])
 
-    return np.array(engineered_features)
+    # Final cleaning to ensure no NaN/Inf values in the entire dataset
+    result = np.array(engineered_features)
+    result = _clean_features(result)
+
+    return result
 
 
 if __name__ == "__main__":

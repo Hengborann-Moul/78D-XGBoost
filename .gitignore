@@ -6,6 +6,9 @@ dist/
 wheels/
 *.egg-info
 
+# Agent Skills
+.agents
+
 # Virtual environments
 .venv
 
