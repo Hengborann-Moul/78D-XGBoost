@@ -6,9 +6,11 @@ Strategy:
 - Train preliminary XGBoost models for each state
 - Aggregate feature importance across all states
 - Select top-k features based on combined importance
+- NEW: Multi-task feature selection with cross-task regularization
 
 Author: Hengborann MOUL
 Date: 2026-03-18
+Updated: 2026-03-24 (Added multi-task feature selection)
 """
 
 import numpy as np
@@ -25,6 +27,8 @@ class MultiTaskFeatureSelector:
 
     Uses XGBoost feature importance to select the most relevant features
     across all affective states (boredom, engagement, confusion, frustration).
+
+    NEW: Also supports multi-task LASSO for cross-task feature selection.
     """
 
     AFFECTIVE_STATES = ["boredom", "engagement", "confusion", "frustration"]
@@ -34,27 +38,38 @@ class MultiTaskFeatureSelector:
         k_features: int = 500,
         aggregation: str = "mean_rank",
         random_state: int = 42,
+        use_multitask_lasso: bool = False,
+        lasso_alpha: Optional[float] = None,
+        combine_methods: bool = False,
     ):
         """
-        Initialize feature selector.
+                Initialize feature selector.
 
-        Args:
-            k_features: Number of features to select
-            aggregation: How to aggregate importance across states
-                         'mean_rank' - average rank across states
-                         'mean_score' - average importance score
-                         'max_score' - maximum importance across states
-                         'sum_score' - sum of importance scores
-            random_state: Random seed for reproducibility
+                Args:
+                    k_features: Number of features to select
+                    aggregation: How to aggregate importance across states
+                                 'mean_rank' - average rank across states
+                                 'mean_score' - average importance score
+                                 'max_score' - maximum importance across states
+                                 'sum_score' - sum of importance scores
+                    random_state: Random seed for reproducibility
+                    use_multitask_lasso: Use MultiTaskLasso for feature selection
+                                         instead of XGBoost importance
+        lasso_alpha: LASSO regularization strength (None = auto-tune via CV)
+                    combine_methods: Combine XGBoost importance + multi-task LASSO
         """
         self.k_features = k_features
         self.aggregation = aggregation
         self.random_state = random_state
+        self.use_multitask_lasso = use_multitask_lasso
+        self.lasso_alpha = lasso_alpha
+        self.combine_methods = combine_methods
 
         self.selected_indices: Optional[np.ndarray] = None
         self.selected_names: Optional[List[str]] = None
         self.importance_scores: Optional[Dict[str, np.ndarray]] = None
         self.feature_names: Optional[List[str]] = None
+        self.lasso_coefs_: Optional[np.ndarray] = None
 
     def fit(
         self,
@@ -83,11 +98,16 @@ class MultiTaskFeatureSelector:
 
         if verbose:
             print("=" * 70)
-            print("FEATURE SELECTION (Model-Based)")
+            print("FEATURE SELECTION")
             print("=" * 70)
             print(f"Input features: {X.shape[1]}")
             print(f"Target features: {self.k_features}")
-            print(f"Aggregation method: {self.aggregation}")
+            if self.use_multitask_lasso:
+                print("Method: Multi-task LASSO")
+            elif self.combine_methods:
+                print("Method: Combined (XGBoost + Multi-task LASSO)")
+            else:
+                print(f"Method: XGBoost importance ({self.aggregation})")
 
         n_features = X.shape[1]
 
@@ -162,8 +182,38 @@ class MultiTaskFeatureSelector:
 
         self.importance_scores = state_importance
 
-        # Aggregate importance across states
-        aggregated = self._aggregate_importance(state_importance, n_features)
+        # Compute aggregated importance based on method selection
+        if self.use_multitask_lasso:
+            # Use multi-task LASSO only
+            aggregated = self._fit_multitask_lasso(
+                X, y_dict, state_importance, n_features, verbose
+            )
+
+        elif self.combine_methods:
+            # Combine XGBoost importance + LASSO
+            lasso_importance = self._fit_multitask_lasso(
+                X, y_dict, state_importance, n_features, verbose
+            )
+
+            # Get XGBoost aggregated importance
+            xgb_aggregated = self._aggregate_importance(state_importance, n_features)
+
+            # Normalize XGBoost importance to [0, 1]
+            xgb_norm = (xgb_aggregated - xgb_aggregated.min()) / (
+                xgb_aggregated.max() - xgb_aggregated.min() + 1e-10
+            )
+
+            # Combine: 60% XGBoost, 40% LASSO (encourages shared features)
+            aggregated = 0.6 * xgb_norm + 0.4 * lasso_importance
+
+            if verbose:
+                print("\n" + "-" * 70)
+                print("COMBINED IMPORTANCE (XGBoost + Multi-task LASSO)")
+                print("-" * 70)
+                print("XGBoost weight: 0.6, LASSO weight: 0.4")
+        else:
+            # Standard XGBoost aggregation
+            aggregated = self._aggregate_importance(state_importance, n_features)
 
         # Select top-k features
         self.selected_indices = np.argsort(aggregated)[-self.k_features :][::-1]
@@ -182,7 +232,7 @@ class MultiTaskFeatureSelector:
                 f"Selected indices: {self.selected_indices[:10]}... (showing first 10)"
             )
             if self.selected_names:
-                print(f"Top10features: {self.selected_names[:10]}")
+                print(f"Top10 features: {self.selected_names[:10]}")
 
             # Show per-state contribution
             print("\nFeature importance summary:")
@@ -192,13 +242,143 @@ class MultiTaskFeatureSelector:
 
             # Aggregation stats
             selected_aggregated = aggregated[self.selected_indices]
-            print(f"\nAggregated importance (selected features):")
+            print("\nAggregated importance (selected features):")
             print(f"  Mean: {np.mean(selected_aggregated):.4f}")
             print(f"  Std:  {np.std(selected_aggregated):.4f}")
             print(f"  Min:  {np.min(selected_aggregated):.4f}")
             print(f"  Max:  {np.max(selected_aggregated):.4f}")
 
         return self
+
+    def _fit_multitask_lasso(
+        self,
+        X: np.ndarray,
+        y_dict: Dict[str, np.ndarray],
+        state_importance: Dict[str, np.ndarray],
+        n_features: int,
+        verbose: bool = True,
+    ) -> np.ndarray:
+        """
+        Fit multi-task LASSO for feature selection with cross-task regularization.
+
+        This method uses MultiTaskLassoCV to learn features that are important
+        across all tasks simultaneously, encouraging shared feature representations.
+
+        Args:
+            X: Training features (n_samples, n_features)
+            y_dict: Dictionary of labels for each affective state
+            state_importance: Pre-computed XGBoost importance (for combination)
+            n_features: Total number of features
+            verbose: Print progress
+
+        Returns:
+            Aggregated feature importance scores
+        """
+        from sklearn.linear_model import MultiTaskLassoCV, MultiTaskLasso
+        from sklearn.preprocessing import LabelBinarizer
+        import warnings
+
+        if verbose:
+            print("\n" + "=" * 70)
+            print("MULTI-TASK LASSO FEATURE SELECTION")
+            print("=" * 70)
+            print("Training MultiTaskLassoCV with cross-validation...")
+            print(f"Input features: {n_features}")
+
+        # Convert multi-class labels to continuous targets for multi-task learning
+        # Strategy: Use one-hot encoded probabilities as soft targets
+        n_states = len(self.AFFECTIVE_STATES)
+        n_classes = 3  # Low, Medium, High
+        Y_targets = np.zeros((X.shape[0], n_states * n_classes))
+
+        for idx, state in enumerate(self.AFFECTIVE_STATES):
+            y = y_dict[state]
+
+            # Create one-hot encoding
+            lb = LabelBinarizer()
+            y_onehot = lb.fit_transform(y)
+
+            # Ensure 3 columns (for 3 classes)
+            if y_onehot.shape[1] == 2:
+                # Binary case: add column for missing class
+                y_onehot = np.column_stack([y_onehot, np.zeros((len(y), 1))])
+            elif y_onehot.shape[1] == 1:
+                # Single class case
+                y_onehot = np.column_stack([y_onehot, np.zeros((len(y), 2))])
+
+            Y_targets[:, idx * n_classes : (idx + 1) * n_classes] = y_onehot
+
+        # Fit MultiTaskLassoCV
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+
+            if self.lasso_alpha is None:
+                # Auto-tune alpha via cross-validation
+                alphas = np.logspace(-4, 0, 50)
+                try:
+                    mlasso = MultiTaskLassoCV(
+                        alphas=alphas,
+                        cv=5,
+                        max_iter=10000,
+                        tol=1e-4,
+                        random_state=self.random_state,
+                        n_jobs=-1,
+                    )
+                    mlasso.fit(X, Y_targets)
+
+                    if verbose:
+                        print(f"Best alpha found: {mlasso.alpha_:.6f}")
+                        print(f"Number of iterations: {mlasso.n_iter_}")
+
+                except Exception as e:
+                    if verbose:
+                        print(
+                            f"Warning: MultiTaskLassoCV failed ({e}). Using fixed alpha."
+                        )
+                    mlasso = MultiTaskLasso(
+                        alpha=0.01,
+                        max_iter=10000,
+                        tol=1e-4,
+                        random_state=self.random_state,
+                    )
+                    mlasso.fit(X, Y_targets)
+            else:
+                # Use specified alpha
+                mlasso = MultiTaskLasso(
+                    alpha=self.lasso_alpha,
+                    max_iter=10000,
+                    tol=1e-4,
+                    random_state=self.random_state,
+                )
+                mlasso.fit(X, Y_targets)
+
+        # Store coefficients: shape (n_targets, n_features)
+        self.lasso_coefs_ = mlasso.coef_
+
+        if verbose:
+            # Calculate feature importance from LASSO coefficients
+            lasso_importance = np.abs(self.lasso_coefs_).sum(axis=0)
+
+            # Count non-zero features
+            n_nonzero = np.sum(lasso_importance > 0)
+            print(f"Non-zero features: {n_nonzero} / {n_features}")
+
+            # Show top features
+            top_5_idx = np.argsort(lasso_importance)[-5:][::-1]
+            print(f"Top 5 LASSO features: {top_5_idx}")
+            print(
+                f"LASSO importance range: [{lasso_importance.min():.6f}, {lasso_importance.max():.6f}]"
+            )
+
+        # Calculate LASSO-based feature importance
+        lasso_importance = np.abs(self.lasso_coefs_).sum(axis=0)
+
+        # Normalize to [0, 1] range
+        lasso_importance = (lasso_importance - lasso_importance.min()) / (
+            lasso_importance.max() - lasso_importance.min() + 1e-10
+        )
+
+        return lasso_importance
 
     def _aggregate_importance(
         self,
@@ -356,10 +536,14 @@ class MultiTaskFeatureSelector:
             "k_features": self.k_features,
             "aggregation": self.aggregation,
             "random_state": self.random_state,
+            "use_multitask_lasso": self.use_multitask_lasso,
+            "lasso_alpha": self.lasso_alpha,
+            "combine_methods": self.combine_methods,
             "selected_indices": self.selected_indices,
             "selected_names": self.selected_names,
             "importance_scores": self.importance_scores,
             "feature_names": self.feature_names,
+            "lasso_coefs_": self.lasso_coefs_,
         }
 
         with open(filepath, "wb") as f:
@@ -385,14 +569,24 @@ class MultiTaskFeatureSelector:
             k_features=data["k_features"],
             aggregation=data["aggregation"],
             random_state=data["random_state"],
+            use_multitask_lasso=data.get("use_multitask_lasso", False),
+            lasso_alpha=data.get("lasso_alpha", None),
+            combine_methods=data.get("combine_methods", False),
         )
         selector.selected_indices = data["selected_indices"]
         selector.selected_names = data["selected_names"]
         selector.importance_scores = data["importance_scores"]
         selector.feature_names = data["feature_names"]
+        selector.lasso_coefs_ = data.get("lasso_coefs_", None)
 
         print(f"Feature selector loaded from: {filepath}")
         print(f"  Features: {len(selector.selected_indices)}")
+        if selector.use_multitask_lasso:
+            print(f"  Method: Multi-task LASSO")
+        elif selector.combine_methods:
+            print(f"  Method: Combined (XGBoost + LASSO)")
+        else:
+            print(f"  Method: XGBoost importance ({selector.aggregation})")
 
         return selector
 

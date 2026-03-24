@@ -58,6 +58,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from feature_engineering import FeatureEngineer, engineer_dataset_features
+from preprocessing.feature_selector import MultiTaskFeatureSelector
 from model.ensemble_model import EnsembleModel, optimal_weight_search
 from model.lstm_model import EngagementLSTM, MultiTaskLoss, get_model_summary
 from model.xgboost_model import EngagementXGBoost
@@ -529,6 +530,7 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
     model_cfg = cfg["model"]
     xgb_cfg = cfg.get("xgboost", {})
     fe_cfg = cfg.get("feature_engineering", {})
+    fs_cfg = cfg.get("feature_selection", {})
     imbalance_cfg = cfg.get("imbalance_handling", {})
     threshold_cfg = cfg.get("threshold_optimization", {})
     calib_cfg = cfg.get("calibration", {})
@@ -545,6 +547,62 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
     else:
         X_train_eng = X_train.reshape(len(X_train), -1)
         X_val_eng = X_val.reshape(len(X_val), -1)
+
+    # Feature selection
+    use_feature_selection = fs_cfg.get("enabled", False)
+    selector = None
+
+    if use_feature_selection and engineer_features:
+        k_features = fs_cfg.get("k_features", 500)
+        aggregation = fs_cfg.get("aggregation", "mean_rank")
+        use_mt_lasso = fs_cfg.get("use_multitask_lasso", False)
+        combine_methods = fs_cfg.get("combine_methods", False)
+        lasso_alpha = fs_cfg.get("lasso_alpha", None)
+
+        print("\n" + "=" * 70)
+        print("FEATURE SELECTION")
+        print("=" * 70)
+        print(f"Input features: {X_train_eng.shape[1]}")
+        print(f"Target features: {k_features}")
+        if use_mt_lasso:
+            print("Method: Multi-task LASSO")
+        elif combine_methods:
+            print("Method: Combined (XGBoost + Multi-task LASSO)")
+        else:
+            print(f"Method: XGBoost importance ({aggregation})")
+
+        selector = MultiTaskFeatureSelector(
+            k_features=k_features,
+            aggregation=aggregation,
+            use_multitask_lasso=use_mt_lasso,
+            combine_methods=combine_methods,
+            lasso_alpha=lasso_alpha,
+        )
+
+        # Prepare labels for feature selection
+        y_dict_for_fs = {state: y_train[state] for state in AFFECTIVE_STATES}
+
+        # Fit selector
+        X_train_selected = selector.fit_transform(
+            X_train_eng,
+            y_dict_for_fs,
+            feature_names=None,  # Engineered features don't have descriptive names
+            verbose=True,
+        )
+        X_val_selected = selector.transform(X_val_eng)
+
+        print(f"\nSelected features: {X_train_selected.shape[1]}")
+
+        # Save selector
+        selector_path = run_dir / "checkpoints" / "feature_selector.pkl"
+        selector.save(str(selector_path))
+
+        # Use selected features for training
+        X_train_final = X_train_selected
+        X_val_final = X_val_selected
+    else:
+        X_train_final = X_train_eng
+        X_val_final = X_val_eng
 
     # Separate early_stopping_rounds (constructor-only param) from the XGBoost
     # hyperparameters that feed XGBClassifier — passing it to both causes a
@@ -598,9 +656,9 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
     print(f"  Threshold optimization: {optimize_thresholds}")
 
     xgb_model.fit(
-        X_train_eng,
+        X_train_final,
         y_train,
-        X_val_eng,
+        X_val_final,
         y_val,
         feature_names=None,
         verbose=True,
@@ -621,7 +679,11 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
         history_path, index=False
     )
 
-    return xgb_model, X_train_eng  # return engineered train data for later reuse
+    return (
+        xgb_model,
+        X_train_final,
+        selector,
+    )  # return selector for later use with test set
 
 
 # ---------------------------------------------------------------------------
@@ -1209,21 +1271,30 @@ def main():
     # -------------------------------------------------------------------
     elif model_name == "xgboost":
         fe_cfg = cfg.get("feature_engineering", {})
+        fs_cfg = cfg.get("feature_selection", {})
 
-        xgb_model, X_train_eng = train_xgboost(
+        xgb_model, X_train_eng, selector = train_xgboost(
             X_train, y_train, X_val, y_val, cfg, run_dir, feature_names
         )
 
         # Engineer test features
         if fe_cfg.get("enabled", True):
-            print("\nEngineering features for test set ...")
+            print("\nEngineering features for test set...")
             X_test_eng = engineer_dataset_features(
                 np.array(X_test), feature_names, verbose=False
             )
         else:
             X_test_eng = np.array(X_test).reshape(len(X_test), -1)
 
-        all_preds, all_probs = predict_xgboost(xgb_model, X_test_eng)
+        # Apply feature selection if enabled
+        if selector is not None and fs_cfg.get("enabled", False):
+            print(f"Applying feature selection to test set...")
+            X_test_final = selector.transform(X_test_eng)
+            print(f"Test features after selection: {X_test_final.shape[1]}")
+        else:
+            X_test_final = X_test_eng
+
+        all_preds, all_probs = predict_xgboost(xgb_model, X_test_final)
 
         # No epoch-based training curves — skip
         history = {}
