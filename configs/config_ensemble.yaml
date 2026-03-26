@@ -77,10 +77,41 @@ xgboost:
     include_interaction:  true
     include_domain:       true
 
+  # Feature Selection
+  feature_selection:
+    enabled: true
+    k_features: 2000
+    aggregation: "mean_rank"  # options: mean_rank | mean_score | max_score | sum_score
+    use_multitask_lasso: false
+    combine_methods: true
+    lasso_alpha: null
+
   # Model
   model:
     num_classes: 3
     use_gpu: true
+
+  # Class Imbalance Handling
+  imbalance_handling:
+    enabled: true
+    strategy: "smote"
+    smote_k_neighbors: 5
+    smote_random_state: 42
+
+  # Threshold Optimization
+  threshold_optimization:
+    enabled: true
+    metric: "f1_macro"
+    search_range_min: 0.2
+    search_range_max: 0.8
+    search_steps: 20
+
+  # Probability Calibration
+  calibration:
+    enabled: true
+    method: "isotonic"
+    use_calibration_set: true
+    calibration_ratio: 0.15
 
   # XGBoost Hyperparameters
   params:
@@ -92,8 +123,8 @@ xgboost:
     colsample_bytree: 0.8
     min_child_weight: 3
     gamma: 0.1
-    reg_alpha: 0.1       # L1 regularization
-    reg_lambda: 1.0      # L2 regularization
+    reg_alpha: 0.1
+    reg_lambda: 1.0
     random_state: 42
     n_jobs: -1
     verbosity: 0
@@ -101,9 +132,9 @@ xgboost:
 
   # Focal Loss (for class imbalance)
   focal_loss:
-    enabled: true        # Enable focal loss objective (recommended for imbalanced data)
-    alpha: 0.25          # Weighting factor (0.25 = slight down-weighting of easy examples)
-    gamma: 2.0           # Focusing parameter (2.0 = moderate focus on hard examples)
+    enabled: true
+    alpha: 0.25
+    gamma: 2.0
 
 # ============================================================
 # Ensemble

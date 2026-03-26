@@ -771,7 +771,7 @@ def train_ensemble(
     """
     Full ensemble training pipeline:
       1. Train LSTM sub-model
-      2. Train XGBoost sub-model
+      2. Train XGBoost sub-model (with all features: SMOTE, calibration, threshold opt)
       3. Optionally search for optimal blend weights on val set
       4. Build EnsembleModel and predict on test set
 
@@ -816,20 +816,29 @@ def train_ensemble(
     )
 
     # ------------------------------------------------------------------
-    # 2. Train XGBoost
+    # 2. Train XGBoost (full pipeline matching standalone XGBoost)
     # ------------------------------------------------------------------
     print("\n" + "=" * 70)
     print("ENSEMBLE — Step 2/2: Training XGBoost sub-model")
     print("=" * 70)
 
     fe_cfg = xgb_cfg.get("feature_engineering", {})
-    use_eng = fe_cfg.get("enabled", True)
+    fs_cfg = xgb_cfg.get("feature_selection", {})
+    imbalance_cfg = xgb_cfg.get("imbalance_handling", {})
+    threshold_cfg = xgb_cfg.get("threshold_optimization", {})
+    calib_cfg = xgb_cfg.get("calibration", {})
+    focal_cfg = xgb_cfg.get("focal_loss", {})
+    model_cfg = xgb_cfg.get("model", {})
+    params_cfg = xgb_cfg.get("params", {})
+
+    engineer_features = fe_cfg.get("enabled", True)
 
     X_train_arr = np.array(X_train)
     X_val_arr = np.array(X_val)
     X_test_arr = np.array(X_test)
 
-    if use_eng:
+    # Feature engineering
+    if engineer_features:
         print("\nEngineering features for training set ...")
         X_train_eng = engineer_dataset_features(
             X_train_arr, feature_names, verbose=True
@@ -844,31 +853,115 @@ def train_ensemble(
         X_val_eng = X_val_arr.reshape(len(X_val_arr), -1)
         X_test_eng = X_test_arr.reshape(len(X_test_arr), -1)
 
-    xgb_params = xgb_cfg.get("params", {})
-    early_stopping = xgb_params.get("early_stopping_rounds", 50)
+    # Feature selection
+    use_feature_selection = fs_cfg.get("enabled", False)
+    selector = None
+
+    if use_feature_selection and engineer_features:
+        k_features = fs_cfg.get("k_features", 2000)
+        aggregation = fs_cfg.get("aggregation", "mean_rank")
+        use_mt_lasso = fs_cfg.get("use_multitask_lasso", False)
+        combine_methods = fs_cfg.get("combine_methods", False)
+        lasso_alpha = fs_cfg.get("lasso_alpha", None)
+
+        print("\n" + "=" * 70)
+        print("FEATURE SELECTION")
+        print("=" * 70)
+        print(f"Input features: {X_train_eng.shape[1]}")
+        print(f"Target features: {k_features}")
+        if use_mt_lasso:
+            print("Method: Multi-task LASSO")
+        elif combine_methods:
+            print("Method: Combined (XGBoost + Multi-task LASSO)")
+        else:
+            print(f"Method: XGBoost importance ({aggregation})")
+
+        selector = MultiTaskFeatureSelector(
+            k_features=k_features,
+            aggregation=aggregation,
+            use_multitask_lasso=use_mt_lasso,
+            combine_methods=combine_methods,
+            lasso_alpha=lasso_alpha,
+        )
+
+        y_dict_for_fs = {state: y_train[state] for state in AFFECTIVE_STATES}
+
+        X_train_selected = selector.fit_transform(
+            X_train_eng,
+            y_dict_for_fs,
+            feature_names=None,
+            verbose=True,
+        )
+        X_val_selected = selector.transform(X_val_eng)
+        X_test_selected = selector.transform(X_test_eng)
+
+        print(f"\nSelected features: {X_train_selected.shape[1]}")
+
+        selector_path = run_dir / "checkpoints" / "ensemble_feature_selector.pkl"
+        selector.save(str(selector_path))
+
+        X_train_final = X_train_selected
+        X_val_final = X_val_selected
+        X_test_final = X_test_selected
+    else:
+        X_train_final = X_train_eng
+        X_val_final = X_val_eng
+        X_test_final = X_test_eng
+
+    # Extract XGBoost params
+    early_stopping = params_cfg.get("early_stopping_rounds", 50)
     xgb_model_params = {
-        k: v for k, v in xgb_params.items() if k != "early_stopping_rounds"
+        k: v for k, v in params_cfg.items() if k != "early_stopping_rounds"
     }
 
-    # Focal loss configuration for ensemble
-    focal_cfg = xgb_cfg.get("focal_loss", {})
+    # SMOTE and imbalance handling
+    use_smote = imbalance_cfg.get("enabled", True)
+    smote_strategy = imbalance_cfg.get("strategy", "smote")
+    smote_k_neighbors = imbalance_cfg.get("smote_k_neighbors", 5)
+
+    # Threshold optimization
+    optimize_thresholds = threshold_cfg.get("enabled", True)
+    threshold_metric = threshold_cfg.get("metric", "f1_macro")
+
+    # Calibration
+    calibrate_probabilities = calib_cfg.get("enabled", True)
+    calibration_method = calib_cfg.get("method", "isotonic")
+
+    # Focal Loss
     use_focal_loss = focal_cfg.get("enabled", False)
     focal_alpha = focal_cfg.get("alpha", 0.25)
     focal_gamma = focal_cfg.get("gamma", 2.0)
 
     xgb_model = EngagementXGBoost(
-        num_classes=xgb_cfg["model"].get("num_classes", 4),
-        use_gpu=xgb_cfg["model"].get("use_gpu", False),
+        num_classes=model_cfg.get("num_classes", 4),
+        use_gpu=model_cfg.get("use_gpu", False),
         early_stopping_rounds=early_stopping,
+        use_smote=use_smote,
+        smote_strategy=smote_strategy,
+        smote_k_neighbors=smote_k_neighbors,
+        calibrate_probabilities=calibrate_probabilities,
+        calibration_method=calibration_method,
+        optimize_thresholds=optimize_thresholds,
+        threshold_metric=threshold_metric,
         use_focal_loss=use_focal_loss,
         focal_alpha=focal_alpha,
         focal_gamma=focal_gamma,
         **xgb_model_params,
     )
+
+    print("\nTraining XGBoost model:")
+    print(f"  SMOTE: {use_smote} (strategy={smote_strategy})")
+    print(f"  Focal Loss: {use_focal_loss}")
+    if use_focal_loss:
+        print(f"    alpha={focal_alpha}, gamma={focal_gamma}")
+    print(f"  Calibration: {calibrate_probabilities}")
+    print(f"  Threshold optimization: {optimize_thresholds}")
+    print(f"  Feature selection: {use_feature_selection}")
+
     xgb_model.fit(
-        X_train_eng,
+        X_train_final,
         y_train,
-        X_val_eng,
+        X_val_final,
         y_val,
         feature_names=None,
         verbose=True,
@@ -881,6 +974,12 @@ def train_ensemble(
         )
     )
 
+    # Save feature selector checkpoint
+    if selector is not None:
+        selector_path = run_dir / "checkpoints" / "ensemble_feature_selector.pkl"
+        selector.save(str(selector_path))
+        print(f"✓ Feature selector saved to {selector_path}")
+
     # ------------------------------------------------------------------
     # 3. Optionally search optimal blend weights on the validation set
     # ------------------------------------------------------------------
@@ -888,7 +987,6 @@ def train_ensemble(
     xgb_weight = ens_cfg.get("xgb_weight", 0.4)
 
     if ens_cfg.get("search_optimal_weights", True):
-        # Collect val-set probabilities from each sub-model
         eval_cfg = cfg.get("evaluation", {})
         lstm_val_preds, lstm_val_probs = predict_lstm(
             lstm_model,
@@ -897,7 +995,7 @@ def train_ensemble(
             device,
             batch_size=eval_cfg.get("batch_size", 64),
         )
-        xgb_val_probs = xgb_model.predict_proba(X_val_eng)
+        xgb_val_probs = xgb_model.predict_proba(X_val_final)
 
         lstm_weight, xgb_weight = run_optimal_weight_search(
             lstm_val_probs, xgb_val_probs, y_val, ens_cfg
@@ -916,15 +1014,14 @@ def train_ensemble(
         lstm_weight=lstm_weight,
         xgb_weight=xgb_weight,
         device=str(device),
+        feature_selector=selector,
     )
 
     print("\n" + "=" * 70)
     print("ENSEMBLE — Predicting on test set")
     print("=" * 70)
 
-    # Use EnsembleModel's own predict_proba (handles LSTM + XGBoost internally)
-    # For the LSTM path it calls _get_lstm_predictions (batches through the model)
-    # but that method doesn't batch — wrap manually for large test sets.
+    # Get LSTM predictions
     lstm_test_preds, lstm_test_probs = predict_lstm(
         lstm_model,
         X_test,
@@ -932,7 +1029,9 @@ def train_ensemble(
         device,
         batch_size=cfg.get("evaluation", {}).get("batch_size", 64),
     )
-    xgb_test_probs = xgb_model.predict_proba(X_test_eng)
+
+    # Get XGBoost predictions (use selected features if available)
+    xgb_test_probs = xgb_model.predict_proba(X_test_final)
 
     # Weighted blend
     all_probs = {}
@@ -947,7 +1046,7 @@ def train_ensemble(
     # Also run the built-in comparison (prints LSTM vs XGBoost vs Ensemble)
     ensemble.evaluate_individual_models(X_test, y_test)
 
-    # Persist XGBoost training history note
+    # Persist training history note
     pd.DataFrame(
         [{"note": "XGBoost sub-model does not produce per-epoch history."}]
     ).to_csv(run_dir / "metrics" / "training_history.csv", index=False)

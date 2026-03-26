@@ -6,11 +6,12 @@ This ensemble approach achieves 73-76% accuracy vs 68-72% for LSTM alone!
 
 Author: Hengborann MOUL
 Date: 2026-03-05
+Updated: 2026-03-25 (Added feature selection support, updated for new XGBoost pipeline)
 """
 
 import numpy as np
 import torch
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, List, Optional, Tuple
 from sklearn.metrics import accuracy_score, f1_score, classification_report
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -19,6 +20,7 @@ from model.lstm_model import EngagementLSTM
 from model.xgboost_model import EngagementXGBoost
 from normalization.feature_normalization import FeatureNormalizer
 from feature_engineering import FeatureEngineer, engineer_dataset_features
+from preprocessing.feature_selector import MultiTaskFeatureSelector
 
 
 class EnsembleModel:
@@ -64,7 +66,8 @@ class EnsembleModel:
         engineer: FeatureEngineer,
         lstm_weight: float = 0.6,
         xgb_weight: float = 0.4,
-        device: str = 'cpu'
+        device: str = "cpu",
+        feature_selector: Optional[MultiTaskFeatureSelector] = None,
     ):
         """
         Initialize ensemble model.
@@ -77,11 +80,13 @@ class EnsembleModel:
             lstm_weight: Weight for LSTM predictions (0-1)
             xgb_weight: Weight for XGBoost predictions (0-1)
             device: Device for LSTM inference
+            feature_selector: Optional fitted feature selector for XGBoost input
         """
         self.lstm_model = lstm_model
         self.xgboost_model = xgboost_model
         self.normalizer = normalizer
         self.engineer = engineer
+        self.feature_selector = feature_selector
 
         # Ensemble weights (must sum to 1)
         total = lstm_weight + xgb_weight
@@ -95,6 +100,10 @@ class EnsembleModel:
         print("Ensemble initialized:")
         print(f"  LSTM weight:   {self.lstm_weight:.2f}")
         print(f"  XGBoost weight: {self.xgb_weight:.2f}")
+        if self.feature_selector is not None:
+            print(
+                f"  Feature selector: {self.feature_selector.k_features} features selected"
+            )
 
     def predict_proba(self, X: np.ndarray) -> Dict[str, np.ndarray]:
         """
@@ -114,10 +123,10 @@ class EnsembleModel:
 
         # Ensemble: Weighted average
         ensemble_probs = {}
-        for state in ['boredom', 'engagement', 'confusion', 'frustration']:
+        for state in ["boredom", "engagement", "confusion", "frustration"]:
             ensemble_probs[state] = (
-                self.lstm_weight * lstm_probs[state] +
-                self.xgb_weight * xgb_probs[state]
+                self.lstm_weight * lstm_probs[state]
+                + self.xgb_weight * xgb_probs[state]
             )
 
         return ensemble_probs
@@ -134,8 +143,7 @@ class EnsembleModel:
         """
         probs = self.predict_proba(X)
         predictions = {
-            state: np.argmax(probs, axis=1)
-            for state, probs in probs.items()
+            state: np.argmax(probs, axis=1) for state, probs in probs.items()
         }
         return predictions
 
@@ -153,32 +161,37 @@ class EnsembleModel:
         return probs
 
     def _get_xgboost_predictions(self, X: np.ndarray) -> Dict[str, np.ndarray]:
-        """Get probability predictions from XGBoost."""
+        """Get probability predictions from XGBoost.
+
+        Applies feature engineering followed by optional feature selection.
+        """
         # Engineer features
         X_engineered = engineer_dataset_features(
-            X,
-            self.normalizer.feature_names,
-            verbose=False
+            X, self.normalizer.feature_names, verbose=False
         )
 
+        # Apply feature selection if selector is available
+        if self.feature_selector is not None:
+            X_final = self.feature_selector.transform(X_engineered)
+        else:
+            X_final = X_engineered
+
         # Get predictions
-        probs = self.xgboost_model.predict_proba(X_engineered)
+        probs = self.xgboost_model.predict_proba(X_final)
 
         return probs
 
     def evaluate_individual_models(
-        self,
-        X_test: np.ndarray,
-        y_test: Dict[str, np.ndarray]
+        self, X_test: np.ndarray, y_test: Dict[str, np.ndarray]
     ) -> Dict:
         """
         Evaluate each model individually and the ensemble.
 
         Returns detailed comparison showing why ensemble is better.
         """
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("DETAILED MODEL COMPARISON")
-        print("="*80)
+        print("=" * 80)
 
         # Get predictions from each model
         lstm_probs = self._get_lstm_predictions(X_test)
@@ -192,25 +205,25 @@ class EnsembleModel:
 
         results = {}
 
-        for state in ['boredom', 'engagement', 'confusion', 'frustration']:
+        for state in ["boredom", "engagement", "confusion", "frustration"]:
             y_true = y_test[state]
 
             # LSTM metrics
             lstm_acc = accuracy_score(y_true, lstm_preds[state])
-            lstm_f1 = f1_score(y_true, lstm_preds[state], average='macro')
+            lstm_f1 = f1_score(y_true, lstm_preds[state], average="macro")
 
             # XGBoost metrics
             xgb_acc = accuracy_score(y_true, xgb_preds[state])
-            xgb_f1 = f1_score(y_true, xgb_preds[state], average='macro')
+            xgb_f1 = f1_score(y_true, xgb_preds[state], average="macro")
 
             # Ensemble metrics
             ensemble_acc = accuracy_score(y_true, ensemble_preds[state])
-            ensemble_f1 = f1_score(y_true, ensemble_preds[state], average='macro')
+            ensemble_f1 = f1_score(y_true, ensemble_preds[state], average="macro")
 
             results[state] = {
-                'lstm': {'accuracy': lstm_acc, 'f1': lstm_f1},
-                'xgboost': {'accuracy': xgb_acc, 'f1': xgb_f1},
-                'ensemble': {'accuracy': ensemble_acc, 'f1': ensemble_f1}
+                "lstm": {"accuracy": lstm_acc, "f1": lstm_f1},
+                "xgboost": {"accuracy": xgb_acc, "f1": xgb_f1},
+                "ensemble": {"accuracy": ensemble_acc, "f1": ensemble_f1},
             }
 
             print(f"\n{state.upper()}:")
@@ -221,14 +234,16 @@ class EnsembleModel:
             # Show improvement
             best_single = max(lstm_acc, xgb_acc)
             improvement = ensemble_acc - best_single
-            print(f"  → Improvement: {improvement:+.4f} ({improvement*100:+.1f}%)")
+            print(f"  → Improvement: {improvement:+.4f} ({improvement * 100:+.1f}%)")
 
         # Overall metrics
-        overall_lstm_acc = np.mean([r['lstm']['accuracy'] for r in results.values()])
-        overall_xgb_acc = np.mean([r['xgboost']['accuracy'] for r in results.values()])
-        overall_ensemble_acc = np.mean([r['ensemble']['accuracy'] for r in results.values()])
+        overall_lstm_acc = np.mean([r["lstm"]["accuracy"] for r in results.values()])
+        overall_xgb_acc = np.mean([r["xgboost"]["accuracy"] for r in results.values()])
+        overall_ensemble_acc = np.mean(
+            [r["ensemble"]["accuracy"] for r in results.values()]
+        )
 
-        print("\n" + "─"*80)
+        print("\n" + "─" * 80)
         print("OVERALL PERFORMANCE:")
         print(f"  LSTM:     {overall_lstm_acc:.4f}")
         print(f"  XGBoost:  {overall_xgb_acc:.4f}")
@@ -236,7 +251,9 @@ class EnsembleModel:
 
         best_single = max(overall_lstm_acc, overall_xgb_acc)
         improvement = overall_ensemble_acc - best_single
-        print(f"\n  🎯 Ensemble improvement: {improvement:+.4f} ({improvement*100:+.1f}%)")
+        print(
+            f"\n  🎯 Ensemble improvement: {improvement:+.4f} ({improvement * 100:+.1f}%)"
+        )
 
         return results
 
@@ -244,15 +261,15 @@ class EnsembleModel:
         self,
         X_test: np.ndarray,
         y_test: Dict[str, np.ndarray],
-        state: str = 'engagement'
+        state: str = "engagement",
     ):
         """
         Analyze cases where LSTM and XGBoost disagree.
         This shows why ensemble works!
         """
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"DISAGREEMENT ANALYSIS: {state.upper()}")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         # Get predictions
         lstm_probs = self._get_lstm_predictions(X_test)
@@ -269,7 +286,9 @@ class EnsembleModel:
         num_disagreements = np.sum(disagreement_mask)
 
         print(f"\nTotal samples: {len(y_true)}")
-        print(f"Disagreements: {num_disagreements} ({num_disagreements/len(y_true)*100:.1f}%)")
+        print(
+            f"Disagreements: {num_disagreements} ({num_disagreements / len(y_true) * 100:.1f}%)"
+        )
 
         if num_disagreements == 0:
             print("Models always agree (rare!)")
@@ -278,40 +297,64 @@ class EnsembleModel:
         # Analyze disagreement cases
         disagreement_indices = np.where(disagreement_mask)[0]
 
-        lstm_correct = np.sum(lstm_pred[disagreement_indices] == y_true[disagreement_indices])
-        xgb_correct = np.sum(xgb_pred[disagreement_indices] == y_true[disagreement_indices])
-        ensemble_correct = np.sum(ensemble_pred[disagreement_indices] == y_true[disagreement_indices])
+        lstm_correct = np.sum(
+            lstm_pred[disagreement_indices] == y_true[disagreement_indices]
+        )
+        xgb_correct = np.sum(
+            xgb_pred[disagreement_indices] == y_true[disagreement_indices]
+        )
+        ensemble_correct = np.sum(
+            ensemble_pred[disagreement_indices] == y_true[disagreement_indices]
+        )
 
         print("\nWhen models disagree:")
-        print(f"  LSTM correct:     {lstm_correct}/{num_disagreements} ({lstm_correct/num_disagreements*100:.1f}%)")
-        print(f"  XGBoost correct:  {xgb_correct}/{num_disagreements} ({xgb_correct/num_disagreements*100:.1f}%)")
-        print(f"  Ensemble correct: {ensemble_correct}/{num_disagreements} ({ensemble_correct/num_disagreements*100:.1f}%)")
+        print(
+            f"  LSTM correct:     {lstm_correct}/{num_disagreements} ({lstm_correct / num_disagreements * 100:.1f}%)"
+        )
+        print(
+            f"  XGBoost correct:  {xgb_correct}/{num_disagreements} ({xgb_correct / num_disagreements * 100:.1f}%)"
+        )
+        print(
+            f"  Ensemble correct: {ensemble_correct}/{num_disagreements} ({ensemble_correct / num_disagreements * 100:.1f}%)"
+        )
 
         # Show examples
-        print(f"\n{'─'*80}")
+        print(f"\n{'─' * 80}")
         print("EXAMPLE DISAGREEMENTS:")
-        print(f"{'─'*80}")
+        print(f"{'─' * 80}")
 
         num_examples = min(5, num_disagreements)
         for i in range(num_examples):
             idx = disagreement_indices[i]
-            print(f"\nExample {i+1}:")
-            print(f"  True label:      {y_true[idx]} ({['Very Low', 'Low', 'High', 'Very High'][y_true[idx]]})")
-            print(f"  LSTM predicted:  {lstm_pred[idx]} ({['Very Low', 'Low', 'High', 'Very High'][lstm_pred[idx]]})")
-            print(f"  XGBoost pred:    {xgb_pred[idx]} ({['Very Low', 'Low', 'High', 'Very High'][xgb_pred[idx]]})")
-            print(f"  Ensemble pred:   {ensemble_pred[idx]} ({['Very Low', 'Low', 'High', 'Very High'][ensemble_pred[idx]]})")
+            print(f"\nExample {i + 1}:")
+            print(
+                f"  True label:      {y_true[idx]} ({['Very Low', 'Low', 'High', 'Very High'][y_true[idx]]})"
+            )
+            print(
+                f"  LSTM predicted:  {lstm_pred[idx]} ({['Very Low', 'Low', 'High', 'Very High'][lstm_pred[idx]]})"
+            )
+            print(
+                f"  XGBoost pred:    {xgb_pred[idx]} ({['Very Low', 'Low', 'High', 'Very High'][xgb_pred[idx]]})"
+            )
+            print(
+                f"  Ensemble pred:   {ensemble_pred[idx]} ({['Very Low', 'Low', 'High', 'Very High'][ensemble_pred[idx]]})"
+            )
 
             # Show confidence
             lstm_conf = lstm_probs[state][idx]
             xgb_conf = xgb_probs[state][idx]
-            print(f"  LSTM confidence:    [{', '.join([f'{p:.2f}' for p in lstm_conf])}]")
-            print(f"  XGBoost confidence: [{', '.join([f'{p:.2f}' for p in xgb_conf])}]")
+            print(
+                f"  LSTM confidence:    [{', '.join([f'{p:.2f}' for p in lstm_conf])}]"
+            )
+            print(
+                f"  XGBoost confidence: [{', '.join([f'{p:.2f}' for p in xgb_conf])}]"
+            )
 
     def visualize_ensemble_advantage(
         self,
         X_test: np.ndarray,
         y_test: Dict[str, np.ndarray],
-        save_path: Optional[str] = None
+        save_path: Optional[str] = None,
     ):
         """
         Create visualization showing ensemble advantage.
@@ -322,9 +365,9 @@ class EnsembleModel:
         ensemble_probs = self.predict_proba(X_test)
 
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle('Ensemble Model Advantage', fontsize=16, fontweight='bold')
+        fig.suptitle("Ensemble Model Advantage", fontsize=16, fontweight="bold")
 
-        states = ['boredom', 'engagement', 'confusion', 'frustration']
+        states = ["boredom", "engagement", "confusion", "frustration"]
 
         for idx, (ax, state) in enumerate(zip(axes.flat, states)):
             # Get predictions
@@ -339,39 +382,54 @@ class EnsembleModel:
             ensemble_acc = accuracy_score(y_true, ensemble_pred)
 
             # Bar chart
-            models = ['LSTM', 'XGBoost', 'Ensemble']
+            models = ["LSTM", "XGBoost", "Ensemble"]
             accuracies = [lstm_acc, xgb_acc, ensemble_acc]
-            colors = ['#3498db', '#e74c3c', '#2ecc71']
+            colors = ["#3498db", "#e74c3c", "#2ecc71"]
 
-            bars = ax.bar(models, accuracies, color=colors, alpha=0.7, edgecolor='black')
+            bars = ax.bar(
+                models, accuracies, color=colors, alpha=0.7, edgecolor="black"
+            )
 
             # Highlight best
             best_idx = np.argmax(accuracies)
             bars[best_idx].set_alpha(1.0)
-            bars[best_idx].set_edgecolor('gold')
+            bars[best_idx].set_edgecolor("gold")
             bars[best_idx].set_linewidth(3)
 
             # Add values on bars
             for i, (model, acc) in enumerate(zip(models, accuracies)):
-                ax.text(i, acc + 0.01, f'{acc:.3f}',
-                       ha='center', va='bottom', fontweight='bold')
+                ax.text(
+                    i,
+                    acc + 0.01,
+                    f"{acc:.3f}",
+                    ha="center",
+                    va="bottom",
+                    fontweight="bold",
+                )
 
-            ax.set_ylabel('Accuracy', fontsize=11)
-            ax.set_title(state.capitalize(), fontsize=12, fontweight='bold')
+            ax.set_ylabel("Accuracy", fontsize=11)
+            ax.set_title(state.capitalize(), fontsize=12, fontweight="bold")
             ax.set_ylim([0, 1])
-            ax.grid(axis='y', alpha=0.3)
+            ax.grid(axis="y", alpha=0.3)
 
             # Show improvement
             improvement = ensemble_acc - max(lstm_acc, xgb_acc)
-            ax.text(0.5, 0.95, f'Improvement: +{improvement*100:.1f}%',
-                   transform=ax.transAxes, ha='center', va='top',
-                   bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.5),
-                   fontsize=10, fontweight='bold')
+            ax.text(
+                0.5,
+                0.95,
+                f"Improvement: +{improvement * 100:.1f}%",
+                transform=ax.transAxes,
+                ha="center",
+                va="top",
+                bbox=dict(boxstyle="round", facecolor="yellow", alpha=0.5),
+                fontsize=10,
+                fontweight="bold",
+            )
 
         plt.tight_layout()
 
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
             print(f"\n✓ Visualization saved to: {save_path}")
         else:
             plt.show()
@@ -383,7 +441,7 @@ def optimal_weight_search(
     lstm_probs: Dict[str, np.ndarray],
     xgb_probs: Dict[str, np.ndarray],
     y_true: Dict[str, np.ndarray],
-    state: str = 'engagement'
+    state: str = "engagement",
 ) -> Tuple[float, float]:
     """
     Find optimal ensemble weights for a specific state.
@@ -397,9 +455,9 @@ def optimal_weight_search(
     Returns:
         best_lstm_weight, best_xgb_weight
     """
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"SEARCHING FOR OPTIMAL WEIGHTS: {state.upper()}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     best_acc = 0
     best_weights = (0.5, 0.5)
@@ -440,9 +498,9 @@ def explain_why_ensemble_works():
     """
     Print detailed explanation of why ensemble works better.
     """
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("WHY ENSEMBLE WORKS BETTER: DETAILED EXPLANATION")
-    print("="*80)
+    print("=" * 80)
 
     print("""
 ╔════════════════════════════════════════════════════════════════════════╗
@@ -581,16 +639,16 @@ def explain_why_ensemble_works():
 
 
 if __name__ == "__main__":
-    print("="*80)
+    print("=" * 80)
     print("ENSEMBLE MODEL - DEMONSTRATION")
-    print("="*80)
+    print("=" * 80)
 
     # Show explanation
     explain_why_ensemble_works()
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("To use the ensemble in practice:")
-    print("="*80)
+    print("=" * 80)
     print("""
 # 1. Train both models
 trainer.train_lstm(X_train, y_train, X_val, y_val)
