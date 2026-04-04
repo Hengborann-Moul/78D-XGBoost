@@ -1,0 +1,366 @@
+\documentclass{article}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\SetKwInput{KwInput}{Input}
+\SetKwInput{KwOutput}{Output}
+\SetKwInput{KwData}{Data}
+\SetKwInput{KwResult}{Result}
+
+\SetKwFunction{FExtract}{ExtractFeatures}
+\SetKwFunction{FProcess}{ProcessVideo}
+\SetKwFunction{FNormalize}{NormalizeFeatures}
+\SetKwFunction{FTransform}{TransformLabels}
+\SetKwFunction{FSplit}{SplitDataset}
+
+\SetKwProg{Fn}{Function}{:}{}
+\SetKwFor{ForEach}{foreach}{do}{endfor}
+
+\begin{document}
+
+\title{Data Preprocessing Pipeline\\for Affective State Recognition}
+\author{AttentionNet Project}
+\date{\today}
+\maketitle
+
+\section{Overview}
+
+This document presents the formal algorithm procedures for the data preprocessing pipeline used in our affective state recognition system. The pipeline transforms raw video data from the DAiSEE dataset into normalized feature sequences suitable for machine learning models.
+
+\section{Algorithm Procedures}
+
+\subsection{Video Feature Extraction}
+
+Algorithm~\ref{alg:video_extraction} describes the process of extracting fixed-length feature sequences from individual video clips using MediaPipe.
+
+\begin{algorithm}[H]
+\caption{Video Feature Extraction and Sequence Normalization}
+\label{alg:video_extraction}
+\KwInput{Video path $v$, sequence length $L$, frame skip $s$}
+\KwOutput{Feature tensor $\mathbf{X} \in \mathbb{R}^{L \times 78}$}
+
+\BlankLine
+\SetAlgoVlined
+$\mathcal{F} \leftarrow []$ \tcp*{Initialize empty frame feature list}
+$\mathcal{E} \leftarrow \text{MediaPipeFeatureExtractor}()$ \tcp*{Initialize extractor}
+$f \leftarrow 0$ \tcp*{Frame counter}
+
+\BlankLine
+\While{frames remaining in $v$}{
+    \If{$f \mod s = 0$}{
+        $\mathbf{f}_t \leftarrow \mathcal{E}.\text{extract\_frame}(v, f)$;
+        
+        \If{$\mathbf{f}_t \neq \text{None}$}{
+            $\mathcal{F}.\text{append}(\mathbf{f}_t)$ \tcp*{Add 78D feature vector}
+        }
+    }
+    $f \leftarrow f + 1$;
+}
+
+\BlankLine
+\If{$|\mathcal{F}| < L$}{
+    \textbf{return} None \tcp*{Skip clip: insufficient frames}
+}
+
+\BlankLine
+$\mathbf{F} \leftarrow \text{stack}(\mathcal{F})$ \tcp*{$\mathbf{F} \in \mathbb{R}^{n \times 78}$}
+$\mathbf{X} \leftarrow \text{AdjustSequenceLength}(\mathbf{F}, L)$ \tcp*{Algorithm~\ref{alg:sequence_adjust}}
+
+\BlankLine
+\Return{$\mathbf{X}$}
+\end{algorithm}
+
+\subsection{Sequence Length Adjustment}
+
+Algorithm~\ref{alg:sequence_adjust} ensures all feature sequences have a fixed length through downsampling or padding.
+
+\begin{algorithm}[H]
+\caption{Adjust Sequence Length}
+\label{alg:sequence_adjust}
+\KwInput{Feature matrix $\mathbf{F} \in \mathbb{R}^{n \times 78}$, target length $L$}
+\KwOutput{Normalized sequence $\mathbf{X} \in \mathbb{R}^{L \times 78}$}
+
+\BlankLine
+\eIf{$n = L$}{
+    $\mathbf{X} \leftarrow \mathbf{F}$;
+}
+{
+    \eIf{$n > L$}{
+        \tcp{Uniform downsampling}
+        $\mathcal{I} \leftarrow \text{linspace}(0, n-1, L)$;
+        $\mathbf{X} \leftarrow \mathbf{F}[\mathcal{I}, :]$;
+    }
+    {
+        \tcp{Padding with last frame}
+        $p \leftarrow L - n$;
+        $\mathbf{P} \leftarrow \text{repeat}(\mathbf{F}[-1, :], p)$;
+        $\mathbf{X} \leftarrow \text{concatenate}([\mathbf{F}, \mathbf{P}], \text{axis}=0)$;
+    }
+}
+
+\BlankLine
+\Return{$\mathbf{X}$}
+\end{algorithm}
+
+\subsection{Label Transformation}
+
+Algorithm~\ref{alg:label_transform} describes the transformation from DAiSEE's 4-level annotation to 3-class labels.
+
+\begin{algorithm}[H]
+\caption{Label Transformation (4-Level $\rightarrow$ 3-Class)}
+\label{alg:label_transform}
+\KwInput{Original label $\ell \in \{0, 1, 2, 3\}$, affective state $a$}
+\KwOutput{Transformed label $\ell' \in \{0, 1, 2\}$}
+
+\BlankLine
+\tcp{DAiSEE original levels: 0=Very Low, 1=Low, 2=High, 3=Very High}
+
+\BlankLine
+\If{$a \in \{\text{Boredom}, \text{Confusion}, \text{Frustration}\}$}{
+    \eIf{$\ell \geq 2$}{
+        $\ell' \leftarrow 2$ \tcp*{Merge High(2) and Very High(3)}
+    }
+    {
+        $\ell' \leftarrow \ell$ \tcp*{Keep Very Low(0) and Low(1) unchanged}
+    }
+}
+
+\BlankLine
+\If{$a = \text{Engagement}$}{
+    \uCase{$\ell \leq 1$}{
+        $\ell' \leftarrow 0$ \tcp*{Merge Very Low(0) and Low(1)}
+    }
+    \uCase{$\ell = 2$}{
+        $\ell' \leftarrow 1$ \tcp*{High becomes Medium}
+    }
+    \uCase{$\ell = 3$}{
+        $\ell' \leftarrow 2$ \tcp*{Very High unchanged}
+    }
+}
+
+\BlankLine
+\Return{$\ell'$}
+\end{algorithm}
+
+\subsection{Dataset Processing Pipeline}
+
+Algorithm~\ref{alg:dataset_processing} presents the complete dataset processing pipeline that orchestrates feature extraction, label transformation, and data normalization.
+
+\begin{algorithm}[H]
+\caption{Complete Dataset Processing Pipeline}
+\label{alg:dataset_processing}
+\KwInput{DAiSEE root directory $\mathcal{D}$, sequence length $L$, frame skip $s$}
+\KwOutput{Processed dataset $\mathcal{S} = \{\mathbf{X}, \mathbf{Y}, \mathcal{P}\}$}
+
+\BlankLine
+\SetAlgoVlined
+$\mathcal{V} \leftarrow []$ \tcp*{Video paths}
+$\mathcal{Y} \leftarrow \{\text{boredom: } [], \text{engagement: } [], \text{confusion: } [], \text{frustration: } []\}$;
+
+\BlankLine
+\tcp{Step 1: Load dataset structure}
+\ForEach{split $\in \{\text{Train}, \text{Validation}, \text{Test}\}$}{
+    $\text{df} \leftarrow \text{read\_csv}(\mathcal{D}/\text{Labels}/\text{split}Labels.csv)$;
+    
+    \ForEach{row $\in$ df}{
+        $v \leftarrow \text{find\_video}(\mathcal{D}/\text{DataSet}/\text{split}, \text{row.ClipID})$;
+        
+        \If{$v \neq \text{None}$}{
+            $\mathcal{V}.\text{append}(v)$;
+            
+            \ForEach{state $\in \{\text{Boredom}, \text{Engagement}, \text{Confusion}, \text{Frustration}\}$}{
+                $\ell \leftarrow \text{row}[state]$;
+                $\ell' \leftarrow \text{TransformLabel}(\ell, state)$ \tcp*{Alg.~\ref{alg:label_transform}}
+                $\mathcal{Y}[\text{state.lower()}].\text{append}(\ell')$;
+            }
+        }
+    }
+}
+
+\BlankLine
+\tcp{Step 2: Extract features}
+$\mathbf{X} \leftarrow []$;
+$\mathcal{S}_{\text{failed}} \leftarrow \emptyset$;
+
+\ForEach{$v \in \mathcal{V}$}{
+    $\mathbf{x} \leftarrow \text{ExtractVideoFeatures}(v, L, s)$ \tcp*{Alg.~\ref{alg:video_extraction}}
+    
+    \If{$\mathbf{x} \neq \text{None}$}{
+        $\mathbf{X}.\text{append}(\mathbf{x})$;
+    }
+    \Else{
+        $\mathcal{S}_{\text{failed}}.\text{add}(v)$;
+    }
+}
+
+\BlankLine
+\tcp{Step 3: Align labels with successful extractions}
+$\mathbf{X} \leftarrow \text{stack}(\mathbf{X})$ \tcp*{$\mathbf{X} \in \mathbb{R}^{N \times L \times 78}$}
+
+\ForEach{state $\in \{\text{boredom}, \text{engagement}, \text{confusion}, \text{frustration}\}$}{
+    $\mathbf{Y}[\text{state}] \leftarrow \text{array}(\mathcal{Y}[\text{state}])$;
+}
+
+\BlankLine
+\tcp{Step 4: Feature normalization}
+$\mu \leftarrow \text{mean}(\mathbf{X}, \text{axis}=(0, 1))$;
+$\sigma \leftarrow \text{std}(\mathbf{X}, \text{axis}=(0, 1))$;
+$\mathbf{X}_{\text{norm}} \leftarrow \frac{\mathbf{X} - \mu}{\sigma}$;
+
+\BlankLine
+\tcp{Step 5: Create output dictionary}
+$\mathcal{S} \leftarrow \left\{
+    \mathbf{X} \leftarrow \mathbf{X}_{\text{norm}},
+    \mathbf{Y} \leftarrow \mathbf{Y},
+    \mathcal{P} \leftarrow \mathcal{V} \setminus \mathcal{S}_{\text{failed}}
+\right\}$;
+
+\BlankLine
+\Return{$\mathcal{S}$}
+\end{algorithm}
+
+\subsection{Train/Validation/Test Split}
+
+Algorithm~\ref{alg:split} describes the dataset splitting procedure that maintains stratification across affective states.
+
+\begin{algorithm}[H]
+\caption{Dataset Splitting}
+\label{alg:split}
+\KwInput{Dataset $\mathcal{S} = \{\mathbf{X}, \mathbf{Y}, \mathcal{P}\}$, ratios $(r_{\text{train}}, r_{\text{val}}, r_{\text{test}})$}
+\KwOutput{Split indices $\{\mathcal{I}_{\text{train}}, \mathcal{I}_{\text{val}}, \mathcal{I}_{\text{test}}\}$}
+
+\BlankLine
+\tcp{Verify ratio constraint}
+\textbf{assert} $r_{\text{train}} + r_{\text{val}} + r_{\text{test}} \approx 1.0$;
+
+\BlankLine
+$N \leftarrow |\mathbf{X}|$;
+$\mathcal{I} \leftarrow \text{permutation}(N)$ \tcp*{Shuffle indices}
+
+\BlankLine
+\tcp{Compute split boundaries}
+$i_{\text{train}} \leftarrow \lfloor N \cdot r_{\text{train}} \rfloor$;
+$i_{\text{val}} \leftarrow i_{\text{train}} + \lfloor N \cdot r_{\text{val}} \rfloor$;
+
+\BlankLine
+$\mathcal{I}_{\text{train}} \leftarrow \mathcal{I}[0 : i_{\text{train}}]$;
+$\mathcal{I}_{\text{val}} \leftarrow \mathcal{I}[i_{\text{train}} : i_{\text{val}}]$;
+$\mathcal{I}_{\text{test}} \leftarrow \mathcal{I}[i_{\text{val}} : N]$;
+
+\BlankLine
+\Return{$\{\mathcal{I}_{\text{train}}, \mathcal{I}_{\text{val}}, \mathcal{I}_{\text{test}}\}$}
+\end{algorithm}
+
+\section{Feature Extraction Details}
+
+\subsection{MediaPipe Feature Vector}
+
+Each frame is transformed into a 78-dimensional feature vector comprising:
+
+\begin{table}[h]
+\centering
+\caption{MediaPipe Feature Components}
+\label{tab:features}
+\begin{tabular}{@{}llc@{}}
+\toprule
+\textbf{Component} & \textbf{Description} & \textbf{Dimensions} \\
+\midrule
+Blendshapes & 52 facial expression coefficients & 52 \\
+Head Pose & Euler angles (pitch, yaw, roll) + translation & 6 \\
+Eye Gaze & Left/right eye gaze direction vectors & 6 \\
+Composite Expressions & Derived affective indicators & 10 \\
+Facial Dynamics & Motion and temporal features & 4 \\
+\midrule
+\textbf{Total} & & \textbf{78} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Temporal Parameters}
+
+\begin{table}[h]
+\centering
+\caption{Temporal Processing Parameters}
+\label{tab:temporal}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Video frame rate & 30 fps \\
+Frame skip ($s$) & 2 (effective: 15 fps) \\
+Sequence length ($L$) & 150 frames \\
+Temporal coverage & $\approx$ 5 seconds \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Label Transformation Rationale}
+
+The transformation from 4-level to 3-class labels addresses two key considerations:
+
+\subsection*{Boredom, Confusion, Frustration}
+The original DAiSEE labels provide four levels: \textit{Very Low}, \textit{Low}, \textit{High}, and \textit{Very High}. For these affective states, we merge the upper two levels because:
+\begin{itemize}
+    \item High and Very High levels are semantically similar in these negative states
+    \item Class distribution becomes more balanced
+    \item Model convergence is more stable with 3-class formulation
+\end{itemize}
+
+\subsection*{Engagement}
+For engagement, we merge the lower two levels because:
+\begin{itemize}
+    \item Very Low and Low engagement both indicate disengagement
+    \item Medium engagement serves as a meaningful transition state
+    \item High engagement represents the desired learning state
+\end{itemize}
+
+The transformation can be formalized as:
+
+\begin{equation}
+\ell' = 
+\begin{cases}
+\min(\ell, 2) & \text{if } a \in \{\text{Boredom}, \text{Confusion}, \text{Frustration}\} \\
+\max(0, \ell - 1) & \text{if } a = \text{Engagement}
+\end{cases}
+\end{equation}
+
+where $\ell \in \{0, 1, 2, 3\}$ is the original label and $\ell' \in \{0, 1, 2\}$ is the transformed label.
+
+\section{Computational Complexity}
+
+Let $N$ be the number of videos, $L$ the sequence length, and $d = 78$ the feature dimension.
+
+\begin{itemize}
+    \item \textbf{Feature extraction}: $O(N \cdot T_{\text{video}} \cdot d)$ where $T_{\text{video}}$ is the average video duration
+    \item \textbf{Sequence adjustment}: $O(L \cdot d)$ per video
+    \item \textbf{Normalization}: $O(N \cdot L \cdot d)$ for computing statistics and applying transformation
+    \item \textbf{Total}: $O(N \cdot T_{\text{video}} \cdot d + N \cdot L \cdot d)$
+\end{itemize}
+
+\section{Output Data Structure}
+
+The processed dataset is organized as follows:
+
+\begin{verbatim}
+processed_data/
+├── X_features.npy          # Shape: (N, L, 78)
+├── y_boredom.npy           # Shape: (N,)
+├── y_engagement.npy        # Shape: (N,)
+├── y_confusion.npy         # Shape: (N,)
+├── y_frustration.npy       # Shape: (N,)
+└── complete_dataset.pkl    # Complete dictionary
+\end{verbatim}
+
+where:
+\begin{itemize}
+    \item $N$ = number of successfully processed videos
+    \item $L$ = sequence length (default: 150)
+    \item Labels are integers $\{0, 1, 2\}$ for three-class classification
+\end{itemize}
+
+\end{document}
