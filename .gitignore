@@ -15,7 +15,9 @@ wheels/
 # Datasets
 daisee_features/
 daisee_features_v2/
+daisee_features_base/
 
 # outputs
 outputs/
 outputs_v2/
+outputs_optimal_study/

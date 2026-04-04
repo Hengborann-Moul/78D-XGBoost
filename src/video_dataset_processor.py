@@ -452,19 +452,19 @@ if __name__ == "__main__":
         extractor = MediaPipeFeatureExtractor()
         processor = VideoDatasetProcessor(
             extractor,
-            sequence_length=150,  # 5 seconds at 30fps
-            frame_skip=2          # Use 15fps
+            sequence_length=300,  # 10 seconds at 30fps
+            frame_skip=1          # Use 30fps
         )
 
         # Process dataset
         dataset = processor.process_dataset(
             video_paths,
             labels,
-            output_dir='./daisee_features_v2',
+            output_dir='./daisee_features_base',
             batch_size=100
         )
 
-        print("\n[Complete] Features saved to './daisee_features_v2/'")
+        print("\n[Complete] Features saved to './daisee_features_base/'")
 
     # =========================================================================
     # OPTION 2: Process Custom Videos

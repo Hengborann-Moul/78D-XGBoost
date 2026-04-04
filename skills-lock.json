@@ -346,6 +346,11 @@
       "sourceType": "github",
       "computedHash": "bbef524b1de71df6a64763cbf38e5a1b0c04e953663ec7f88403e4ac816713f0"
     },
+    "industrial-ai-research": {
+      "source": "bahayonghang/academic-writing-skills",
+      "sourceType": "github",
+      "computedHash": "c8c52dcfdd1524e671a8e14c90160404443fbfa91711610206d3c986ebaae3f4"
+    },
     "infographics": {
       "source": "K-Dense-AI/claude-scientific-skills",
       "sourceType": "github",
@@ -386,10 +391,20 @@
       "sourceType": "github",
       "computedHash": "361e3f5c7239e9bcddc7a1622a74b36ed88c579342f9a3133bf485040ca0ffab"
     },
+    "latex-paper-en": {
+      "source": "bahayonghang/academic-writing-skills",
+      "sourceType": "github",
+      "computedHash": "fd1aa307bcb341564c7b04618ec5d4b4ec17c4d738e2b69428317a57cd503a7a"
+    },
     "latex-posters": {
       "source": "K-Dense-AI/claude-scientific-skills",
       "sourceType": "github",
       "computedHash": "b5f12c89ad62b939f5b84ece745e1d5298de0b7d1a954c5ae6361c9a5ece99d7"
+    },
+    "latex-thesis-zh": {
+      "source": "bahayonghang/academic-writing-skills",
+      "sourceType": "github",
+      "computedHash": "0a7017c2bc1ab57b3bf9732d1a9780892d717551122db23ef42d74d720d23ccd"
     },
     "literature-review": {
       "source": "K-Dense-AI/claude-scientific-skills",
@@ -505,6 +520,11 @@
       "source": "K-Dense-AI/claude-scientific-skills",
       "sourceType": "github",
       "computedHash": "48d4501119f6f3201cb3b9e5224021d56c0cee4716d47eac4be5c348bb37a83f"
+    },
+    "paper-audit": {
+      "source": "bahayonghang/academic-writing-skills",
+      "sourceType": "github",
+      "computedHash": "9c78d8f94f48de507a2b27af4917632218952a9262de618a77cd900e81aad073"
     },
     "parallel-web": {
       "source": "K-Dense-AI/claude-scientific-skills",
@@ -820,6 +840,11 @@
       "source": "K-Dense-AI/claude-scientific-skills",
       "sourceType": "github",
       "computedHash": "77733fdb7fda85164675f792645b02018513ccba252e99ed4b21afe3c22d1a59"
+    },
+    "typst-paper": {
+      "source": "bahayonghang/academic-writing-skills",
+      "sourceType": "github",
+      "computedHash": "de7672bafe64e57d820fe2b1b5ddd548117f2ca58a2bb153ba66765c8bf1fc96"
     },
     "umap-learn": {
       "source": "K-Dense-AI/claude-scientific-skills",

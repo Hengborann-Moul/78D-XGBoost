@@ -1,0 +1,495 @@
+\documentclass[11pt,a4paper]{article}
+
+% ============================================================
+% Packages
+% ============================================================
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{multirow}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+% ============================================================
+% Page Setup
+% ============================================================
+\geometry{margin=2.5cm}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+
+% ============================================================
+% Hyperref Setup
+% ============================================================
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,
+    urlcolor=cyan,
+    citecolor=blue,
+    pdftitle={Optimal Study: Frame Count and Feature Importance Analysis},
+    pdfauthor={AttentionNet Research Team},
+}
+
+% ============================================================
+% Code Listing Style
+% ============================================================
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    stepnumber=1,
+    numbersep=8pt,
+    backgroundcolor=\color{gray!10},
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    frame=single,
+    rulecolor=\color{black!30},
+    tabsize=4,
+    captionpos=b,
+    breaklines=true,
+    breakatwhitespace=false,
+    title=\lstname,
+    escapeinside={(*@}{@*)},
+    xleftmargin=2em,
+    xrightmargin=1em,
+}
+
+% ============================================================
+% Title and Author
+% ============================================================
+\title{\textbf{Optimal Study: Frame Count and Feature Importance Analysis}\\\large Technical Documentation for AttentionNet}
+\author{AttentionNet Research Team}
+\date{\today}
+
+% ============================================================
+% Document
+% ============================================================
+\begin{document}
+
+\maketitle
+
+% ============================================================
+\begin{abstract}
+\noindent
+This document describes the ``Optimal Study'' framework designed to empirically determine two critical design choices for affective state recognition from facial video: (1) the optimal number of frames per video clip for classification, and (2) which features among 78 MediaPipe-derived facial features actually drive classification performance. The study consists of two parallel tracks: Track A systematically varies frame sampling rates while using the full feature engineering pipeline to identify performance plateaus; Track B employs three complementary importance methods (XGBoost gain, SHAP values, and permutation importance) combined with hierarchical clustering and ablation studies to identify redundant features and optimal feature subsets.
+\end{abstract}
+
+% ============================================================
+\section{Introduction}\label{sec:introduction}
+
+% ------------------------------------------------------------
+\subsection{Motivation}
+
+Deep learning models for affective computing from video face two fundamental design questions that are often answered heuristically rather than empirically:
+
+\begin{enumerate}
+    \item \textbf{Temporal granularity}: How many frames per video clip are necessary for reliable classification? Taking too few frames may miss temporal dynamics; taking too many increases computational overhead without accuracy gains.
+    
+    \item \textbf{Feature relevance}: Among the 78 facial features extracted by MediaPipe (52 blendshapes, 6 head pose, 6 eye gaze, 10 expression composites, 4 dynamics), which features actually contribute to classification? Many may be pure noise or redundant.
+\end{enumerate}
+
+The DAiSEE dataset used in AttentionNet consists of 10-second clips at 24fps (approximately 240 raw frames), which are downsampled to 150 frames in the current pipeline. This raises the question: \textit{Is 150 frames optimal, or could we achieve equivalent performance with fewer frames?}
+
+% ------------------------------------------------------------
+\subsection{Contributions}
+
+This study provides:
+\begin{itemize}
+    \item An empirical framework for temporal ablation studies in video-based affective computing
+    \item A three-method consensus approach to feature importance ranking
+    \item Hierarchical clustering for identifying and removing redundant features
+    \item Ablation studies demonstrating the minimum viable feature set
+    \item Reproducible experimental methodology with comprehensive logging
+\end{itemize}
+
+% ============================================================
+\section{Methodology}\label{sec:methodology}
+
+The optimal study consists of two parallel tracks conducted independently:
+
+\begin{description}
+    \item[Track A] Finding the optimal frame count through temporal ablation
+    \item[Track B] Feature importance analysis through multi-method consensus ranking
+\end{description}
+
+Both tracks use the same base dataset (DAiSEE with 300 frames per video) and identical XGBoost hyperparameters to ensure fair comparison.
+
+% ------------------------------------------------------------
+\subsection{Dataset}
+
+The study uses the DAiSEE dataset processed as follows:
+
+\begin{itemize}
+    \item \textbf{Source}: 10-second video clips at 24fps
+    \item \textbf{Extraction}: MediaPipe Face Landmarker extracts 78 features per frame
+    \item \textbf{Storage}: \texttt{complete\_dataset.pkl} contains:
+    \begin{itemize}
+        \item $X$: Array of shape $(N_{videos}, 300, 78)$
+        \item $y$: Dictionary of labels for 4 affective states (boredom, engagement, confusion, frustration)
+        \item 3-class labels: Low (0), Medium (1), High (2)
+    \end{itemize}
+\end{itemize}
+
+The dataset is split 70\% train / 15\% validation / 15\% test, stratified by engagement labels.
+
+% ------------------------------------------------------------
+\subsection{Feature Engineering Pipeline}
+
+For each frame count tested in Track A, the full feature engineering pipeline is applied:
+
+\begin{table}[H]
+\centering
+\caption{Feature Engineering Components}
+\label{tab:feature-engineering}
+\begin{tabular}{@{}llr@{}}
+\toprule
+\textbf{Category} & \textbf{Description} & \textbf{Dimension} \\
+\midrule
+Statistical & Mean, std, min, max, percentiles, skewness, kurtosis & $78 \times 10 = 780$ \\
+Temporal & Velocity, acceleration, zero-crossing rate, peaks, trends & $78 \times 8 = 624$ \\
+Frequency & FFT dominant frequency, spectral features & $78 \times 7 = 546$ \\
+Interaction & Cross-feature correlations, ratios, asymmetries & $\sim 100$ \\
+Domain & Attention, arousal, valence, cognitive load scores & $\sim 50$ \\
+\midrule
+\textbf{Total} & & $\sim 2100$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+\section{Track A: Optimal Frame Count Study}\label{sec:track-a}
+
+The goal of Track A is to identify the minimum number of frames required to achieve near-optimal classification performance.
+
+% ------------------------------------------------------------
+\subsection{Frame Sampling Strategy}
+
+Frame counts are tested at: \textbf{10, 20, 30, 50, 75, 100, 150} frames.
+
+For each target frame count $k$, frames are sampled uniformly from the 300 available:
+
+\begin{equation}
+    \text{indices} = \left\lfloor \frac{i \cdot (300 - 1)}{k - 1} \right\rfloor, \quad i = 0, 1, \ldots, k-1
+\end{equation}
+
+This ensures coverage of the entire temporal extent regardless of frame count.
+
+% ------------------------------------------------------------
+\subsection{Experimental Protocol}
+
+For each frame count $k \in \{10, 20, 30, 50, 75, 100, 150\}$:
+
+\begin{algorithm}[H]
+\caption{Track A Experimental Protocol}
+\begin{algorithmic}[1]
+\State Subsample frames from 300 to $k$
+\State Apply feature engineering: $(N, k, 78) \rightarrow (N, \sim 2100)$
+\State Train XGBoost with fixed hyperparameters
+\State Evaluate on held-out test set
+\State Record: accuracy, F1-macro, training time
+\end{algorithmic}
+\end{algorithm}
+
+All experiments use identical XGBoost hyperparameters (max\_depth=8, learning\_rate=0.05, n\_estimators=500) to isolate the effect of frame count.
+
+% ------------------------------------------------------------
+\subsection{Expected Outcomes}
+
+Based on temporal aggregation via mean and standard deviation, we hypothesize:
+
+\begin{enumerate}
+    \item \textbf{Low frame counts (10-20)}: May still capture sufficient signal since statistics stabilize quickly
+    \item \textbf{Mid-range (30-50)}: Performance begins to plateau
+    \item \textbf{High frame counts (75-150)}: Marginal gains diminish; computational overhead increases
+\end{enumerate}
+
+The ``elbow point'' where accuracy stops improving indicates the optimal frame count for practical deployment.
+
+% ------------------------------------------------------------
+\subsection{Outputs}
+
+Track A produces:
+\begin{itemize}
+    \item \texttt{frame\_count\_results.csv}: Performance metrics per frame count
+    \item \texttt{frame\_count\_analysis.png}: Performance curves (accuracy, F1, training time vs. frames)
+    \item Trained models: One XGBoost model per frame count
+\end{itemize}
+
+% ============================================================
+\section{Track B: Feature Importance Study}\label{sec:track-b}
+
+Track B identifies which features among the 78 base features (and their engineered variants) actually drive classification decisions.
+
+% ------------------------------------------------------------
+\subsection{Three-Method Importance Ranking}
+
+We compute feature importance using three complementary methods:
+
+\subsubsection{Method 1: XGBoost Gain Importance}
+
+Gain measures the improvement in accuracy brought by a feature to the branches it is on:
+
+\begin{equation}
+    \text{Gain}(f) = \sum_{t \in T_f} \text{gain}_t
+\end{equation}
+
+where $T_f$ is the set of trees where feature $f$ is used for splitting, and $\text{gain}_t$ is the improvement from that split.
+
+\subsubsection{Method 2: SHAP (SHapley Additive exPlanations)}
+
+SHAP values provide theoretically grounded feature attributions based on cooperative game theory:
+
+\begin{equation}
+    \phi_f = \sum_{S \subseteq F \setminus \{f\}} \frac{|S|!(|F|-|S|-1)!}{|F|!} \left[ f_{S \cup \{f\}}(x_{S \cup \{f\}}) - f_S(x_S) \right]
+\end{equation}
+
+We use the mean absolute SHAP value across all samples as the importance score:
+
+\begin{equation}
+    \text{SHAP\_importance}(f) = \frac{1}{N} \sum_{i=1}^N |\phi_f^{(i)}|
+\end{equation}
+
+\subsubsection{Method 3: Permutation Importance}
+
+Permutation importance measures the decrease in model performance when a single feature value is randomly shuffled:
+
+\begin{equation}
+    \text{Perm\_importance}(f) = \text{score}(\text{model}, X, y) - \text{score}(\text{model}, X_{\text{perm}(f)}, y)
+\end{equation}
+
+This is computed on the validation set using F1-macro as the scoring metric.
+
+% ------------------------------------------------------------
+\subsection{Consensus Ranking}
+
+Features are ranked by each method separately, then a consensus rank is computed as the average:
+
+\begin{equation}
+    \text{Consensus\_Rank}(f) = \frac{\text{Rank}_{\text{XGB}}(f) + \text{Rank}_{\text{SHAP}}(f) + \text{Rank}_{\text{Perm}}(f)}{3}
+\end{equation}
+
+Features with low consensus ranks are robustly important across all three methods.
+
+% ------------------------------------------------------------
+\subsection{Hierarchical Clustering}
+
+To identify redundant features, we perform hierarchical clustering on the 78$\times$78 feature correlation matrix:
+
+\begin{enumerate}
+    \item Compute Pearson correlation: $\rho_{ij} = \text{corr}(X_i, X_j)$
+    \item Convert to distance: $d_{ij} = 1 - |\rho_{ij}|$
+    \item Apply Ward linkage: minimizes variance within clusters
+    \item Cut dendrogram to obtain $k \in \{5, 10, 15, 20\}$ clusters
+\end{enumerate}
+
+This reveals groups of highly correlated (redundant) features from which one representative can be selected.
+
+% ------------------------------------------------------------
+\subsection{Ablation Study}
+
+We retrain models using only the top-$K$ features to determine the minimum viable set:
+
+\begin{equation}
+    K \in \{10, 20, 30, 50, 2100\}
+\end{equation}
+
+where 2100 represents all engineered features. The performance curve (accuracy vs. $K$) identifies the point of diminishing returns.
+
+% ------------------------------------------------------------
+\subsection{Outputs}
+
+Track B produces:
+\begin{itemize}
+    \item \texttt{importance\_rankings.csv}: All three importance methods + consensus
+    \item \texttt{correlation\_matrix.png}: 78$\times$78 feature correlation heatmap
+    \item \texttt{clustering\_dendrogram.png}: Hierarchical clustering visualization
+    \item \texttt{feature\_clusters.csv}: Cluster assignments for different $k$
+    \item \texttt{ablation\_results.csv}: Performance vs. top-$K$ features
+    \item \texttt{feature\_importance\_analysis.png}: Visualization of all results
+\end{itemize}
+
+% ============================================================
+\section{Implementation}\label{sec:implementation}
+
+% ------------------------------------------------------------
+\subsection{Script Usage}
+
+The study is implemented in \texttt{run\_optimal\_study.py}:
+
+\begin{lstlisting}[caption={Basic Usage}]
+# Run both tracks
+python run_optimal_study.py --track both
+
+# Run only Track A (frame count)
+python run_optimal_study.py --track a
+
+# Run only Track B (feature importance)
+python run_optimal_study.py --track b
+
+# Custom configuration
+python run_optimal_study.py --track both \
+    --config configs/config_xgboost.yaml \
+    --data daisee_features_base/complete_dataset.pkl \
+    --output outputs_optimal_study \
+    --frame-counts 10 20 30 50 75 100 150 \
+    --seed 42
+\end{lstlisting}
+
+% ------------------------------------------------------------
+\subsection{Command-Line Arguments}
+
+\begin{table}[H]
+\centering
+\caption{Command-Line Arguments}
+\label{tab:cli-args}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Argument} & \textbf{Description} & \textbf{Default} \\
+\midrule
+\texttt{--track} & Which track to run (a/b/both) & both \\
+\texttt{--config} & Path to YAML config & configs/config\_xgboost.yaml \\
+\texttt{--data} & Path to dataset pickle & daisee\_features\_base/complete\_dataset.pkl \\
+\texttt{--output} & Output directory & outputs\_optimal\_study \\
+\texttt{--frame-counts} & Frame counts to test & 10 20 30 50 75 100 150 \\
+\texttt{--seed} & Random seed & 42 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ------------------------------------------------------------
+\subsection{Output Directory Structure}
+
+\begin{verbatim}
+outputs_optimal_study/
+├── track_a_frame_count/
+│   ├── frame_count_results.csv
+│   ├── frame_count_analysis.png
+│   └── models/
+│       ├── model_frames_10.pkl
+│       ├── model_frames_20.pkl
+│       └── ...
+├── track_b_feature_importance/
+│   ├── importance_rankings.csv
+│   ├── feature_clusters.csv
+│   ├── ablation_results.csv
+│   ├── correlation_matrix.png
+│   ├── clustering_dendrogram.png
+│   ├── feature_importance_analysis.png
+│   └── models/
+│       ├── base_model_all_features.pkl
+│       ├── model_top10_features.pkl
+│       └── ...
+└── study_summary.json
+\end{verbatim}
+
+% ============================================================
+\section{Interpretation Guidelines}\label{sec:interpretation}
+
+% ------------------------------------------------------------
+\subsection{Track A: Identifying the Optimal Frame Count}
+
+When analyzing Track A results:
+
+\begin{enumerate}
+    \item \textbf{Look for the elbow}: The frame count where accuracy/F1 stops improving significantly
+    \item \textbf{Consider efficiency}: Balance performance gains against training/inference time
+    \item \textbf{Statistical significance}: Check if differences between frame counts are meaningful
+\end{enumerate}
+
+\textbf{Example Interpretation}: ``The performance curve shows that increasing frame count beyond 50 frames yields less than 0.5\% improvement in F1-macro, while training time increases by 3$\times$. Therefore, 50 frames is the optimal choice for deployment.''
+
+% ------------------------------------------------------------
+\subsection{Track B: Feature Selection Strategy}
+
+When analyzing Track B results:
+
+\begin{enumerate}
+    \item \textbf{Consensus matters}: Prioritize features ranking highly across all three methods
+    \item \textbf{Domain knowledge}: Cross-reference top features with facial action literature
+    \item \textbf{Cluster representatives}: From each cluster, select the feature with best consensus rank
+    \item \textbf{Ablation validation}: Verify that top-K features can match full-set performance
+\end{enumerate}
+
+\textbf{Example Interpretation}: ``The top 30 features (by consensus rank) achieve 98\% of the full-set accuracy while reducing model complexity by 98.6\%. Hierarchical clustering reveals that eye gaze features form a highly redundant cluster, allowing us to retain only the most informative representative.''
+
+% ============================================================
+\section{Integration with AttentionNet}\label{sec:integration}
+
+% ------------------------------------------------------------
+\subsection{Using Study Results}
+
+The optimal study results guide several design decisions:
+
+\begin{enumerate}
+    \item \textbf{Frame sampling}: Update the video preprocessing pipeline to use the optimal frame count
+    \item \textbf{Feature engineering}: Focus computational resources on the most important feature categories
+    \item \textbf{Model deployment}: Use the minimal viable feature set for efficient inference
+\end{enumerate}
+
+% ------------------------------------------------------------
+\subsection{Extending the Study}
+
+To extend this study:
+
+\begin{itemize}
+    \item \textbf{Additional frame counts}: Add intermediate values (e.g., 40, 60, 125)
+    \item \textbf{Different models}: Repeat with LSTM or Transformer architectures
+    \item \textbf{Cross-validation}: Use k-fold CV for more robust estimates
+    \item \textbf{Feature subsets}: Test importance of engineered feature categories separately
+\end{itemize}
+
+% ============================================================
+\section{Conclusion}\label{sec:conclusion}
+
+This optimal study framework provides an empirical, reproducible methodology for answering two fundamental questions in video-based affective computing:
+
+\begin{enumerate}
+    \item \textbf{How much temporal data is enough?} Through systematic frame count ablation, we identify the point of diminishing returns.
+    
+    \item \textbf{Which features matter?} Through multi-method consensus ranking and ablation studies, we identify the minimal viable feature set.
+\end{enumerate}
+
+The combination of these answers yields an optimized configuration (N frames $\times$ M features) that is justified by empirical evidence rather than heuristic choice.
+
+% ============================================================
+\section*{Acknowledgments}
+
+This study was developed as part of the AttentionNet project for affective state recognition. The methodology draws on best practices from explainable AI (SHAP), ensemble feature selection (consensus ranking), and statistical validation (ablation studies).
+
+% ============================================================
+\begin{thebibliography}{9}
+
+\bibitem{xgboost}
+Chen, T., \& Guestrin, C. (2016). XGBoost: A scalable tree boosting system. In \textit{Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining} (pp. 785-794).
+
+\bibitem{shap}
+Lundberg, S. M., \& Lee, S. I. (2017). A unified approach to interpreting model predictions. In \textit{Advances in Neural Information Processing Systems} (pp. 4765-4774).
+
+\bibitem{permutation}
+Breiman, L. (2001). Random forests. \textit{Machine Learning}, 45(1), 5-32.
+
+\bibitem{daisee}
+Gupta, A., D'Cunha, A., Awasthi, K., \& Balasubramanian, V. (2016). Daisee: Towards user engagement recognition in the wild. \textit{arXiv preprint arXiv:1606.05883}.
+
+\bibitem{mediapipe}
+Lugaresi, C., Tang, J., Nash, H., McClanahan, C., Uboweja, E., Hays, M., ... \& Grundmann, M. (2019). Mediapipe: A framework for building perception pipelines. \textit{arXiv preprint arXiv:1906.08172}.
+
+\end{thebibliography}
+
+\end{document}
