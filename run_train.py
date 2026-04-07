@@ -1879,21 +1879,21 @@ if fi_cfg.get("enabled", False):
     # Create generic feature names for engineered features
     engineered_feature_names = [f"feature_{i}" for i in range(X_train_final.shape[1])]
 
-    # Run analysis
-    fi_output_dir = run_dir / "feature_importance"
-    fi_results = run_feature_importance_analysis(
-        models=xgb_models,
-        X_train=X_train_final,
-        X_val=X_val_final,
-        X_test=X_test_final,
-        y_val=y_val_dict,
-        feature_names=engineered_feature_names,
-        output_dir=str(fi_output_dir),
-        config=cfg,
-        verbose=True,
-    )
+# Run analysis
+fi_output_dir = run_dir / "feature_importance"
+fi_results = run_feature_importance_analysis(
+    models=xgb_models,
+    X_train=X_train_final,
+    X_val=X_val_final,
+    X_test=X_test_final,
+    y_val=y_val_dict,
+    feature_names=engineered_feature_names,
+    output_dir=str(fi_output_dir),
+    config=cfg,
+    verbose=True,
+)
 
-            print(f"\n✓ Feature importance analysis saved to: {fi_output_dir}")
+print(f"\n✓ Feature importance analysis saved to: {fi_output_dir}")
 
         # No epoch-based training curves — skip
         history = {}
