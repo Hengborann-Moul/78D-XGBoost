@@ -236,21 +236,44 @@ class FeatureImportanceAnalyzer:
             else:
                 X_explain = X_val
 
+            # Ensure X_train is 2D for background sampling
+            X_train_2d = X_train
+            if X_train.ndim == 3:
+                N, T, F = X_train.shape
+                X_train_2d = X_train.reshape(N, T * F)
+                if verbose:
+                    print(
+                        f"  Warning: Flattened X_train from {X_train.shape} to {X_train_2d.shape}"
+                    )
+
+            # Ensure X_explain is 2D
+            X_explain_2d = X_explain
+            if X_explain.ndim == 3:
+                N, T, F = X_explain.shape
+                X_explain_2d = X_explain.reshape(N, T * F)
+                if verbose:
+                    print(
+                        f"  Warning: Flattened X_explain from {X_explain.shape} to {X_explain_2d.shape}"
+                    )
+
             if verbose:
                 print(f"  Background samples: {n_bg}")
-                print(f"  Samples to explain: {len(X_explain)}")
+                print(f"  Samples to explain: {len(X_explain_2d)}")
+                print(f"  X_explain shape: {X_explain_2d.shape}")
 
             # Create TreeExplainer
             try:
+                # For XGBoost models, don't pass background data (use built-in)
+                # Newer SHAP versions require proper masker or None for tree models
                 explainer = shap.TreeExplainer(
                     model,
-                    data=background,
-                    feature_names=self.feature_names[: X_explain.shape[1]],
+                    data=None,  # Use built-in background for XGBoost
+                    feature_names=self.feature_names[: X_explain_2d.shape[1]],
                     model_output="probability",
                 )
 
                 # Compute SHAP values
-                shap_vals = explainer.shap_values(X_explain, check_additivity=False)
+                shap_vals = explainer.shap_values(X_explain_2d, check_additivity=False)
 
                 # Handle multi-class output (list of arrays per class)
                 if isinstance(shap_vals, list):
@@ -259,14 +282,14 @@ class FeatureImportanceAnalyzer:
                     self.shap_values[state] = {
                         "per_class": shap_vals,  # List of (N, features) per class
                         "mean_abs": shap_vals_mean,  # (N, features)
-                        "X_explain": X_explain,
+                        "X_explain": X_explain_2d,
                     }
                 else:
                     # Binary classification
                     self.shap_values[state] = {
                         "per_class": [shap_vals],
                         "mean_abs": np.abs(shap_vals),
-                        "X_explain": X_explain,
+                        "X_explain": X_explain_2d,
                     }
 
                 if verbose:
@@ -400,10 +423,30 @@ class FeatureImportanceAnalyzer:
                 scorer = scoring
 
             try:
+                # Ensure X_val is 2D (sklearn requirement)
+                X_val_2d = X_val
+                if X_val.ndim == 3:
+                    # Flatten if 3D (e.g., (N, T, F) -> (N, T*F))
+                    N, T, F = X_val.shape
+                    X_val_2d = X_val.reshape(N, T * F)
+                    if verbose:
+                        print(
+                            f"  Warning: Flattened 3D input from {X_val.shape} to {X_val_2d.shape}"
+                        )
+
+                # Validate dimensions match model expectations
+                if hasattr(model, "n_features_in_"):
+                    if X_val_2d.shape[1] != model.n_features_in_:
+                        if verbose:
+                            print(
+                                f"  Warning: Feature mismatch - data has {X_val_2d.shape[1]} features, model expects {model.n_features_in_}"
+                            )
+                            print(f"  Original X_val shape: {X_val.shape}")
+
                 # Compute permutation importance
                 result = permutation_importance(
                     model,
-                    X_val,
+                    X_val_2d,
                     y_true,
                     n_repeats=n_repeats,
                     scoring=scorer,
