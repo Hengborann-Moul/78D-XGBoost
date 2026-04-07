@@ -1895,8 +1895,8 @@ fi_results = run_feature_importance_analysis(
 
 print(f"\n✓ Feature importance analysis saved to: {fi_output_dir}")
 
-        # No epoch-based training curves — skip
-        history = {}
+# No epoch-based training curves — skip
+history = {}
 
     # -------------------------------------------------------------------
     # Branch: Ensemble
