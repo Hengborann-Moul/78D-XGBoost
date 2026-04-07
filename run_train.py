@@ -45,6 +45,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import (
     accuracy_score,
+    precision_score,
+    recall_score,
     auc,
     classification_report,
     confusion_matrix,
@@ -1082,14 +1084,30 @@ def evaluate_and_save(all_preds, all_probs, y_test, run_dir):
 
         # ---- scalar metrics ----
         acc = accuracy_score(y_true, y_pred)
-        f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=np.nan)  # type: ignore[arg-type]
-        f1_weighted = f1_score(y_true, y_pred, average="weighted", zero_division=np.nan)  # type: ignore[arg-type]
+        precision_macro = precision_score(
+            y_true, y_pred, average="macro", zero_division=np.nan
+        )
+        precision_weighted = precision_score(
+            y_true, y_pred, average="weighted", zero_division=np.nan
+        )
+        recall_macro = recall_score(
+            y_true, y_pred, average="macro", zero_division=np.nan
+        )
+        recall_weighted = recall_score(
+            y_true, y_pred, average="weighted", zero_division=np.nan
+        )
+        f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=np.nan)
+        f1_weighted = f1_score(y_true, y_pred, average="weighted", zero_division=np.nan)
 
         metrics_df = pd.DataFrame(
             [
                 {
                     "state": state,
                     "accuracy": acc,
+                    "precision_macro": precision_macro,
+                    "precision_weighted": precision_weighted,
+                    "recall_macro": recall_macro,
+                    "recall_weighted": recall_weighted,
                     "f1_macro": f1_macro,
                     "f1_weighted": f1_weighted,
                 }
@@ -1106,7 +1124,7 @@ def evaluate_and_save(all_preds, all_probs, y_test, run_dir):
             labels=present_labels,
             target_names=target_names,
             output_dict=True,
-            zero_division=np.nan,  # type: ignore[arg-type]
+            zero_division=np.nan,
         )
         pd.DataFrame(report_dict).transpose().to_csv(
             state_dir / "classification_report.csv"
@@ -1114,13 +1132,18 @@ def evaluate_and_save(all_preds, all_probs, y_test, run_dir):
 
         print(
             f"\n{state.upper():12s}  acc={acc:.4f}  "
-            f"f1_macro={f1_macro:.4f}  f1_weighted={f1_weighted:.4f}"
+            f"prec_macro={precision_macro:.4f}  rec_macro={recall_macro:.4f}  "
+            f"f1_macro={f1_macro:.4f}"
         )
 
         summary_rows.append(
             {
                 "state": state,
                 "accuracy": acc,
+                "precision_macro": precision_macro,
+                "precision_weighted": precision_weighted,
+                "recall_macro": recall_macro,
+                "recall_weighted": recall_weighted,
                 "f1_macro": f1_macro,
                 "f1_weighted": f1_weighted,
             }
@@ -1128,15 +1151,26 @@ def evaluate_and_save(all_preds, all_probs, y_test, run_dir):
 
     # ---- summary ----
     summary_df = pd.DataFrame(summary_rows)
-    mean_row = summary_df[["accuracy", "f1_macro", "f1_weighted"]].mean()
+    mean_row = summary_df[
+        [
+            "accuracy",
+            "precision_macro",
+            "precision_weighted",
+            "recall_macro",
+            "recall_weighted",
+            "f1_macro",
+            "f1_weighted",
+        ]
+    ].mean()
     mean_row["state"] = "MEAN"
     summary_df = pd.concat([summary_df, pd.DataFrame([mean_row])], ignore_index=True)
     summary_df.to_csv(run_dir / "evaluation" / "test_summary.csv", index=False)
 
     print(
         f"\nOVERALL MEAN  acc={mean_row['accuracy']:.4f}  "
-        f"f1_macro={mean_row['f1_macro']:.4f}  "
-        f"f1_weighted={mean_row['f1_weighted']:.4f}"
+        f"prec_macro={mean_row['precision_macro']:.4f}  "
+        f"rec_macro={mean_row['recall_macro']:.4f}  "
+        f"f1_macro={mean_row['f1_macro']:.4f}"
     )
 
     return summary_df
@@ -1293,6 +1327,169 @@ def plot_roc_curves(all_probs, y_test, run_dir: Path):
     print(f"✓ ROC curves saved to {plots_dir}")
 
 
+def plot_metrics_summary(all_preds, y_test, run_dir: Path):
+    """Create bar plot comparing all metrics across affective states."""
+    plots_dir = _ensure_plots_dir(run_dir)
+
+    # Collect metrics for each state
+    metrics_data = []
+    for state in AFFECTIVE_STATES:
+        y_true = np.array(y_test[state])
+        y_pred = np.array(all_preds[state])
+
+        acc = accuracy_score(y_true, y_pred)
+        precision_macro = precision_score(
+            y_true, y_pred, average="macro", zero_division=0
+        )
+        precision_weighted = precision_score(
+            y_true, y_pred, average="weighted", zero_division=0
+        )
+        recall_macro = recall_score(y_true, y_pred, average="macro", zero_division=0)
+        recall_weighted = recall_score(
+            y_true, y_pred, average="weighted", zero_division=0
+        )
+        f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
+        f1_weighted = f1_score(y_true, y_pred, average="weighted", zero_division=0)
+
+        metrics_data.append(
+            {
+                "state": state,
+                "accuracy": acc,
+                "precision_macro": precision_macro,
+                "precision_weighted": precision_weighted,
+                "recall_macro": recall_macro,
+                "recall_weighted": recall_weighted,
+                "f1_macro": f1_macro,
+                "f1_weighted": f1_weighted,
+            }
+        )
+
+    metrics_df = pd.DataFrame(metrics_data)
+
+    # Create multi-panel figure
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    colors = {
+        "boredom": "steelblue",
+        "engagement": "tomato",
+        "confusion": "seagreen",
+        "frustration": "darkorange",
+    }
+
+    # Plot 1: Accuracy
+    ax = axes[0, 0]
+    bars = ax.bar(
+        metrics_df["state"],
+        metrics_df["accuracy"],
+        color=[colors[s] for s in metrics_df["state"]],
+    )
+    ax.set_ylabel("Accuracy")
+    ax.set_title("Accuracy by State")
+    ax.set_ylim(0, 1.15)
+    ax.axhline(
+        y=metrics_df["accuracy"].mean(),
+        color="gray",
+        linestyle="--",
+        label=f"Mean: {metrics_df['accuracy'].mean():.3f}",
+    )
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.bar_label(bars, fmt="%.3f", padding=3, fontsize=8)
+
+    # Plot 2: Precision
+    ax = axes[0, 1]
+    x = np.arange(len(metrics_df))
+    width = 0.35
+    bars1 = ax.bar(
+        x - width / 2,
+        metrics_df["precision_macro"],
+        width,
+        label="Macro",
+        color="steelblue",
+        alpha=0.8,
+    )
+    bars2 = ax.bar(
+        x + width / 2,
+        metrics_df["precision_weighted"],
+        width,
+        label="Weighted",
+        color="coral",
+        alpha=0.8,
+    )
+    ax.set_ylabel("Precision")
+    ax.set_title("Precision by State")
+    ax.set_xticks(x)
+    ax.set_xticklabels(metrics_df["state"], rotation=15)
+    ax.set_ylim(0, 1.15)
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.bar_label(bars1, fmt="%.3f", padding=3, fontsize=7)
+    ax.bar_label(bars2, fmt="%.3f", padding=3, fontsize=7)
+
+    # Plot 3: Recall
+    ax = axes[1, 0]
+    bars1 = ax.bar(
+        x - width / 2,
+        metrics_df["recall_macro"],
+        width,
+        label="Macro",
+        color="seagreen",
+        alpha=0.8,
+    )
+    bars2 = ax.bar(
+        x + width / 2,
+        metrics_df["recall_weighted"],
+        width,
+        label="Weighted",
+        color="goldenrod",
+        alpha=0.8,
+    )
+    ax.set_ylabel("Recall")
+    ax.set_title("Recall by State")
+    ax.set_xticks(x)
+    ax.set_xticklabels(metrics_df["state"], rotation=15)
+    ax.set_ylim(0, 1.15)
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.bar_label(bars1, fmt="%.3f", padding=3, fontsize=7)
+    ax.bar_label(bars2, fmt="%.3f", padding=3, fontsize=7)
+
+    # Plot 4: F1
+    ax = axes[1, 1]
+    bars1 = ax.bar(
+        x - width / 2,
+        metrics_df["f1_macro"],
+        width,
+        label="Macro",
+        color="purple",
+        alpha=0.8,
+    )
+    bars2 = ax.bar(
+        x + width / 2,
+        metrics_df["f1_weighted"],
+        width,
+        label="Weighted",
+        color="teal",
+        alpha=0.8,
+    )
+    ax.set_ylabel("F1 Score")
+    ax.set_title("F1 Score by State")
+    ax.set_xticks(x)
+    ax.set_xticklabels(metrics_df["state"], rotation=15)
+    ax.set_ylim(0, 1.15)
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.bar_label(bars1, fmt="%.3f", padding=3, fontsize=7)
+    ax.bar_label(bars2, fmt="%.3f", padding=3, fontsize=7)
+
+    fig.suptitle("Evaluation Metrics Summary", fontsize=14, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(plots_dir / "metrics_summary.png", dpi=150)
+    plt.close(fig)
+
+    print(f"✓ Metrics summary plot saved to {plots_dir / 'metrics_summary.png'}")
+
+
 # ---------------------------------------------------------------------------
 # Save config copy
 # ---------------------------------------------------------------------------
@@ -1440,6 +1637,7 @@ def main():
     evaluate_and_save(all_preds, all_probs, y_test, run_dir)
     plot_confusion_matrices(all_preds, y_test, run_dir)
     plot_roc_curves(all_probs, y_test, run_dir)
+    plot_metrics_summary(all_preds, y_test, run_dir)
 
     # Update 'latest' symlink now that all outputs are written
     update_latest_symlink(run_dir)

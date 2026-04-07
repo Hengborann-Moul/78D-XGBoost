@@ -776,6 +776,11 @@
       "sourceType": "github",
       "computedHash": "c7292c8048941783cf6b769a7fb48dc1e7df9d4857ea06930bc05573fb1ee357"
     },
+    "senior-ml-engineer": {
+      "source": "davila7/claude-code-templates",
+      "sourceType": "github",
+      "computedHash": "ffbb008afe56a957fbe981b2bff7c1860013acc67910e8763ab261e4f0f5adb8"
+    },
     "shap": {
       "source": "K-Dense-AI/claude-scientific-skills",
       "sourceType": "github",

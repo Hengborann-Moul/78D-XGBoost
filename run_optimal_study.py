@@ -39,7 +39,7 @@ from scipy.cluster.hierarchy import dendrogram, fcluster, linkage
 from scipy.spatial.distance import squareform
 from scipy.stats import spearmanr
 from sklearn.inspection import permutation_importance
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 warnings.filterwarnings("ignore")
 
@@ -310,16 +310,41 @@ def run_track_a_frame_count(
         print("  Evaluating...")
         metrics = model.evaluate(X_test_eng, y_test, verbose=False)
 
+        # Get predictions for precision/recall
+        y_pred = model.predict(X_test_eng)
+
         overall_acc = metrics["overall"]["accuracy"]
         overall_f1 = metrics["overall"]["f1_macro"]
 
+        # Calculate overall precision and recall (macro average across states)
+        overall_precision_macro = np.mean(
+            [
+                precision_score(
+                    y_test[state], y_pred[state], average="macro", zero_division=0
+                )
+                for state in AFFECTIVE_STATES
+            ]
+        )
+        overall_recall_macro = np.mean(
+            [
+                recall_score(
+                    y_test[state], y_pred[state], average="macro", zero_division=0
+                )
+                for state in AFFECTIVE_STATES
+            ]
+        )
+
         print(f"  Test Accuracy: {overall_acc:.4f}")
+        print(f"  Test Precision-macro: {overall_precision_macro:.4f}")
+        print(f"  Test Recall-macro: {overall_recall_macro:.4f}")
         print(f"  Test F1-macro: {overall_f1:.4f}")
 
         # Save result
         result = {
             "frame_count": frame_count,
             "accuracy": overall_acc,
+            "precision_macro": overall_precision_macro,
+            "recall_macro": overall_recall_macro,
             "f1_macro": overall_f1,
             "sampling_time": sampling_time,
             "feat_eng_time": feat_eng_time,
@@ -331,6 +356,12 @@ def run_track_a_frame_count(
         # Per-state metrics
         for state in AFFECTIVE_STATES:
             result[f"{state}_accuracy"] = metrics[state]["accuracy"]
+            result[f"{state}_precision"] = precision_score(
+                y_test[state], y_pred[state], average="macro", zero_division=0
+            )
+            result[f"{state}_recall"] = recall_score(
+                y_test[state], y_pred[state], average="macro", zero_division=0
+            )
             result[f"{state}_f1"] = metrics[state]["f1_macro"]
 
         results.append(result)
@@ -739,22 +770,52 @@ def run_ablation_study(
         # Evaluate
         metrics = model.evaluate(X_test_sub, y_test, verbose=False)
 
+        # Get predictions for precision/recall
+        y_pred = model.predict(X_test_sub)
+
         overall_acc = metrics["overall"]["accuracy"]
         overall_f1 = metrics["overall"]["f1_macro"]
 
+        # Calculate overall precision and recall (macro average across states)
+        overall_precision = np.mean(
+            [
+                precision_score(
+                    y_test[state], y_pred[state], average="macro", zero_division=0
+                )
+                for state in AFFECTIVE_STATES
+            ]
+        )
+        overall_recall = np.mean(
+            [
+                recall_score(
+                    y_test[state], y_pred[state], average="macro", zero_division=0
+                )
+                for state in AFFECTIVE_STATES
+            ]
+        )
+
         print(
-            f"  Accuracy: {overall_acc:.4f}, F1: {overall_f1:.4f}, Time: {training_time:.2f}s"
+            f"  Accuracy: {overall_acc:.4f}, Precision: {overall_precision:.4f}, "
+            f"Recall: {overall_recall:.4f}, F1: {overall_f1:.4f}, Time: {training_time:.2f}s"
         )
 
         result = {
             "k_features": k,
             "accuracy": overall_acc,
+            "precision_macro": overall_precision,
+            "recall_macro": overall_recall,
             "f1_macro": overall_f1,
             "training_time": training_time,
         }
 
         for state in AFFECTIVE_STATES:
             result[f"{state}_accuracy"] = metrics[state]["accuracy"]
+            result[f"{state}_precision"] = precision_score(
+                y_test[state], y_pred[state], average="macro", zero_division=0
+            )
+            result[f"{state}_recall"] = recall_score(
+                y_test[state], y_pred[state], average="macro", zero_division=0
+            )
             result[f"{state}_f1"] = metrics[state]["f1_macro"]
 
         results.append(result)
@@ -939,7 +1000,7 @@ def plot_track_a_results(results_df: pd.DataFrame, output_dir: Path):
     """
     print("\nPlotting Track A results...")
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(3, 2, figsize=(14, 14))
 
     # Plot 1: Accuracy vs Frame Count
     axes[0, 0].plot(
@@ -954,22 +1015,50 @@ def plot_track_a_results(results_df: pd.DataFrame, output_dir: Path):
     axes[0, 0].set_title("Accuracy vs Frame Count")
     axes[0, 0].grid(True, alpha=0.3)
 
-    # Plot 2: F1-macro vs Frame Count
+    # Plot 2: Precision vs Frame Count
     axes[0, 1].plot(
+        results_df["frame_count"],
+        results_df["precision_macro"],
+        "o-",
+        linewidth=2,
+        markersize=8,
+        color="seagreen",
+    )
+    axes[0, 1].set_xlabel("Number of Frames")
+    axes[0, 1].set_ylabel("Test Precision (Macro)")
+    axes[0, 1].set_title("Precision vs Frame Count")
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # Plot 3: Recall vs Frame Count
+    axes[1, 0].plot(
+        results_df["frame_count"],
+        results_df["recall_macro"],
+        "o-",
+        linewidth=2,
+        markersize=8,
+        color="coral",
+    )
+    axes[1, 0].set_xlabel("Number of Frames")
+    axes[1, 0].set_ylabel("Test Recall (Macro)")
+    axes[1, 0].set_title("Recall vs Frame Count")
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # Plot 4: F1-macro vs Frame Count
+    axes[1, 1].plot(
         results_df["frame_count"],
         results_df["f1_macro"],
         "o-",
         linewidth=2,
         markersize=8,
-        color="orange",
+        color="purple",
     )
-    axes[0, 1].set_xlabel("Number of Frames")
-    axes[0, 1].set_ylabel("Test F1-macro")
-    axes[0, 1].set_title("F1-macro vs Frame Count")
-    axes[0, 1].grid(True, alpha=0.3)
+    axes[1, 1].set_xlabel("Number of Frames")
+    axes[1, 1].set_ylabel("Test F1-macro")
+    axes[1, 1].set_title("F1-macro vs Frame Count")
+    axes[1, 1].grid(True, alpha=0.3)
 
-    # Plot 3: Training Time vs Frame Count
-    axes[1, 0].plot(
+    # Plot 5: Training Time vs Frame Count
+    axes[2, 0].plot(
         results_df["frame_count"],
         results_df["training_time"],
         "o-",
@@ -977,13 +1066,13 @@ def plot_track_a_results(results_df: pd.DataFrame, output_dir: Path):
         markersize=8,
         color="green",
     )
-    axes[1, 0].set_xlabel("Number of Frames")
-    axes[1, 0].set_ylabel("Training Time (s)")
-    axes[1, 0].set_title("Training Time vs Frame Count")
-    axes[1, 0].grid(True, alpha=0.3)
+    axes[2, 0].set_xlabel("Number of Frames")
+    axes[2, 0].set_ylabel("Training Time (s)")
+    axes[2, 0].set_title("Training Time vs Frame Count")
+    axes[2, 0].grid(True, alpha=0.3)
 
-    # Plot 4: Total Time vs Frame Count
-    axes[1, 1].plot(
+    # Plot 6: Total Time vs Frame Count
+    axes[2, 1].plot(
         results_df["frame_count"],
         results_df["total_time"],
         "o-",
@@ -991,10 +1080,10 @@ def plot_track_a_results(results_df: pd.DataFrame, output_dir: Path):
         markersize=8,
         color="red",
     )
-    axes[1, 1].set_xlabel("Number of Frames")
-    axes[1, 1].set_ylabel("Total Time (s)")
-    axes[1, 1].set_title("Total Processing Time vs Frame Count")
-    axes[1, 1].grid(True, alpha=0.3)
+    axes[2, 1].set_xlabel("Number of Frames")
+    axes[2, 1].set_ylabel("Total Time (s)")
+    axes[2, 1].set_title("Total Processing Time vs Frame Count")
+    axes[2, 1].grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(output_dir / "frame_count_analysis.png", dpi=300)
@@ -1015,7 +1104,7 @@ def plot_track_b_results(
     """
     print("\nPlotting Track B results...")
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
 
     # Plot 1: Top 20 features by consensus rank
     top_20 = importance_df.head(20)
@@ -1040,33 +1129,63 @@ def plot_track_b_results(
     axes[0, 1].grid(True, alpha=0.3)
 
     # Plot 3: Ablation study - Accuracy
-    axes[1, 0].plot(
+    axes[0, 2].plot(
         ablation_df["k_features"],
         ablation_df["accuracy"],
         "o-",
         linewidth=2,
         markersize=10,
     )
+    axes[0, 2].set_xlabel("Number of Features (K)")
+    axes[0, 2].set_ylabel("Test Accuracy")
+    axes[0, 2].set_title("Ablation Study: Accuracy vs Top-K Features")
+    axes[0, 2].grid(True, alpha=0.3)
+    axes[0, 2].set_xscale("log")
+
+    # Plot 4: Ablation study - Precision
+    axes[1, 0].plot(
+        ablation_df["k_features"],
+        ablation_df["precision_macro"],
+        "o-",
+        linewidth=2,
+        markersize=10,
+        color="seagreen",
+    )
     axes[1, 0].set_xlabel("Number of Features (K)")
-    axes[1, 0].set_ylabel("Test Accuracy")
-    axes[1, 0].set_title("Ablation Study: Accuracy vs Top-K Features")
+    axes[1, 0].set_ylabel("Test Precision (Macro)")
+    axes[1, 0].set_title("Ablation Study: Precision vs Top-K Features")
     axes[1, 0].grid(True, alpha=0.3)
     axes[1, 0].set_xscale("log")
 
-    # Plot 4: Ablation study - F1
+    # Plot 5: Ablation study - Recall
     axes[1, 1].plot(
+        ablation_df["k_features"],
+        ablation_df["recall_macro"],
+        "o-",
+        linewidth=2,
+        markersize=10,
+        color="coral",
+    )
+    axes[1, 1].set_xlabel("Number of Features (K)")
+    axes[1, 1].set_ylabel("Test Recall (Macro)")
+    axes[1, 1].set_title("Ablation Study: Recall vs Top-K Features")
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].set_xscale("log")
+
+    # Plot 6: Ablation study - F1
+    axes[1, 2].plot(
         ablation_df["k_features"],
         ablation_df["f1_macro"],
         "o-",
         linewidth=2,
         markersize=10,
-        color="orange",
+        color="purple",
     )
-    axes[1, 1].set_xlabel("Number of Features (K)")
-    axes[1, 1].set_ylabel("Test F1-macro")
-    axes[1, 1].set_title("Ablation Study: F1-macro vs Top-K Features")
-    axes[1, 1].grid(True, alpha=0.3)
-    axes[1, 1].set_xscale("log")
+    axes[1, 2].set_xlabel("Number of Features (K)")
+    axes[1, 2].set_ylabel("Test F1-macro")
+    axes[1, 2].set_title("Ablation Study: F1-macro vs Top-K Features")
+    axes[1, 2].grid(True, alpha=0.3)
+    axes[1, 2].set_xscale("log")
 
     plt.tight_layout()
     plt.savefig(output_dir / "feature_importance_analysis.png", dpi=300)

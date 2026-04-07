@@ -41,7 +41,7 @@ feature_selection:
   aggregation: "mean_rank"  # options: mean_rank | mean_score | max_score | sum_score
   # NEW: Multi-task feature selection with cross-task regularization
   use_multitask_lasso: false  # Use multi-task LASSO for feature selection
-  combine_methods: true       # Combine XGBoost importance + LASSO (best of both)
+  combine_methods: false       # Combine XGBoost importance + LASSO (best of both)
   lasso_alpha: null           # null = auto-tune via CV, or set specific value (e.g., 0.01)
 
 # --- Class Imbalance Handling ---
