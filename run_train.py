@@ -26,12 +26,14 @@ import yaml
 
 warnings.filterwarnings("ignore")
 
-# ---------------------------------------------------------------------------
-# Resolve project root so src/ imports work regardless of cwd
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Resolve project root for imports
+# ============================================================================
 PROJECT_ROOT = Path(__file__).resolve().parent
 SRC_DIR = PROJECT_ROOT / "src"
 sys.path.insert(0, str(SRC_DIR))
+ANALYSIS_DIR = PROJECT_ROOT / "src" / "analysis"
+sys.path.insert(0, str(ANALYSIS_DIR))
 
 # ---------------------------------------------------------------------------
 # Heavy imports after path setup
@@ -1852,6 +1854,53 @@ def main():
             X_test_final = X_test_eng
 
         all_preds, all_probs = predict_xgboost(xgb_model, X_test_final)
+
+        # Feature Importance Analysis (Two-Stage: SHAP + Permutation)
+        fi_cfg = cfg.get("feature_importance", {})
+        if fi_cfg.get("enabled", False):
+            print("\n" + "=" * 70)
+            print("FEATURE IMPORTANCE ANALYSIS (Two-Stage)")
+            print("=" * 70)
+
+            from analysis.feature_importance_integration import (
+                run_feature_importance_analysis,
+            )
+
+            # Prepare models dict for analyzer
+            xgb_models = {state: xgb_model.models[state] for state in AFFECTIVE_STATES}
+
+            # Prepare validation labels dict
+            y_val_dict = {state: y_val[state] for state in AFFECTIVE_STATES}
+
+            # Use original 78D features (before feature engineering)
+            # For feature importance analysis, we focus on the base MediaPipe features
+            X_train_original = (
+                np.array(X_train)[:, :78]
+                if X_train.shape[-1] >= 78
+                else np.array(X_train)
+            )
+            X_val_original = (
+                np.array(X_val)[:, :78] if X_val.shape[-1] >= 78 else np.array(X_val)
+            )
+            X_test_original = (
+                np.array(X_test)[:, :78] if X_test.shape[-1] >= 78 else np.array(X_test)
+            )
+
+            # Run analysis
+            fi_output_dir = run_dir / "feature_importance"
+            fi_results = run_feature_importance_analysis(
+                models=xgb_models,
+                X_train=X_train_original,
+                X_val=X_val_original,
+                X_test=X_test_original,
+                y_val=y_val_dict,
+                feature_names=feature_names[:78],  # Original 78D feature names
+                output_dir=str(fi_output_dir),
+                config=cfg,
+                verbose=True,
+            )
+
+            print(f"\n✓ Feature importance analysis saved to: {fi_output_dir}")
 
         # No epoch-based training curves — skip
         history = {}
