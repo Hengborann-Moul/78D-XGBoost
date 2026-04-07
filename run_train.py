@@ -62,7 +62,12 @@ from tqdm import tqdm
 from feature_engineering import FeatureEngineer, engineer_dataset_features
 from preprocessing.feature_selector import MultiTaskFeatureSelector
 from model.ensemble_model import EnsembleModel, optimal_weight_search
-from model.lstm_model import EngagementLSTM, MultiTaskLoss, get_model_summary
+from model.lstm_model import (
+    EngagementLSTM,
+    MultiTaskLoss,
+    DynamicTaskWeightedLoss,
+    get_model_summary,
+)
 from model.xgboost_model import EngagementXGBoost
 from normalization.feature_normalization import FeatureNormalizer
 
@@ -352,10 +357,30 @@ def train_lstm(X_train, y_train, X_val, y_val, cfg, run_dir, device):
     )
 
     # Loss, optimizer, scheduler
-    criterion = MultiTaskLoss(
-        num_classes=loss_cfg.get("num_classes", 4),
-        use_focal_loss=loss_cfg.get("use_focal_loss", True),
-    )
+    # Compute class counts for dynamic weighting
+    class_counts = {}
+    for state in AFFECTIVE_STATES:
+        counts = np.bincount(y_train[state], minlength=loss_cfg.get("num_classes", 3))
+        class_counts[state] = counts
+        print(f"  {state:12s}: {counts.tolist()} (total: {counts.sum()})")
+
+    # Use dynamic task-weighted loss for better handling of imbalance
+    use_dynamic_loss = loss_cfg.get("use_dynamic_task_weights", True)
+    if use_dynamic_loss:
+        criterion = DynamicTaskWeightedLoss(
+            num_classes=loss_cfg.get("num_classes", 3),
+            class_counts=class_counts,
+            focal_gamma=loss_cfg.get("focal_gamma", 2.0),
+            dynamic_task_weights=True,
+        )
+        print("\n✓ Using DynamicTaskWeightedLoss (addresses severe imbalance)")
+    else:
+        criterion = MultiTaskLoss(
+            num_classes=loss_cfg.get("num_classes", 3),
+            use_focal_loss=loss_cfg.get("use_focal_loss", True),
+        )
+        print("\n✓ Using MultiTaskLoss (standard)")
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=train_cfg.get("learning_rate", 1e-3),

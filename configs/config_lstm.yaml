@@ -41,6 +41,9 @@ model:
 loss:
   use_focal_loss: true
   num_classes: 3
+  # NEW: Dynamic task-weighted loss for severe imbalance
+  use_dynamic_task_weights: true  # Enable dynamic weighting (recommended)
+  focal_gamma: 2.0                 # Focal loss gamma parameter
 
 # --- Training ---
 training:

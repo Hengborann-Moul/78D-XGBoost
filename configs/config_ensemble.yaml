@@ -29,6 +29,7 @@ normalization:
 # ============================================================
 # LSTM Sub-model
 # ============================================================
+# --- Model Architecture ---
 lstm:
   # Architecture
   model:
@@ -43,8 +44,10 @@ lstm:
 
   # Loss
   loss:
-    use_focal_loss: true
+    use_dynamic_task_weights: true  # Enable dynamic weighting
     num_classes: 3
+    focal_gamma: 2.0
+    use_focal_loss: true
 
   # Training
   training:
