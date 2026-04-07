@@ -56,6 +56,9 @@ class FeatureEngineer:
         # Define feature groups for group-wise operations
         self.feature_groups = self._define_feature_groups()
 
+        # Track feature mapping (engineered -> original)
+        self.feature_mapping = None  # Will be built on first call to engineer_features
+
     def _define_feature_groups(self) -> Dict[str, List[int]]:
         """Define semantic groups of features."""
         groups = {
@@ -666,6 +669,79 @@ class FeatureEngineer:
         names.extend(domain_names)
 
         return names
+
+    def get_original_feature_mapping(self) -> List[List[int]]:
+        """
+        Get mapping from engineered feature indices to original feature indices.
+
+        For each engineered feature, this tells us which original 78D features
+        contributed to it. This is critical for mapping feature importance
+        back to the original MediaPipe features.
+
+        Returns:
+            mapping: List where mapping[i] is a list of original feature indices
+                    that contribute to engineered feature i
+
+        Example:
+            >>> mapping = engineer.get_original_feature_mapping()
+            >>> mapping[0]  # First statistical feature
+            [0]  # Only contributed by original feature 0
+            >>> mapping[780]  # First interaction feature
+            [0, 1, 2, 3, 4, ...]  # Contributed by entire feature group
+        """
+        mapping = []
+
+        # Statistical features: Each engineered stat comes from ONE original feature
+        # 11 stats per original feature -> 78 * 11 = 858 features
+        for orig_idx in range(self.base_dim):
+            for _ in range(11):  # 11 statistical features per original
+                mapping.append([orig_idx])
+
+        # Temporal features: Each engineered temporal stat from ONE original feature
+        # 8 temporal features per original -> 78 * 8 = 624 features
+        for orig_idx in range(self.base_dim):
+            for _ in range(8):  # 8 temporal features per original
+                mapping.append([orig_idx])
+
+        # Frequency features: Each freq component from ONE original feature
+        # 7 frequency features per original -> 78 * 7 = 546 features
+        for orig_idx in range(self.base_dim):
+            for _ in range(7):  # 7 frequency features per original
+                mapping.append([orig_idx])
+
+        # Interaction features: Correlations between feature groups
+        # Each correlation uses ALL features from both groups
+        group_names = list(self.feature_groups.keys())
+        for i, g1 in enumerate(group_names):
+            for g2 in group_names[i + 1 :]:
+                if (
+                    len(self.feature_groups[g1]) >= 2
+                    and len(self.feature_groups[g2]) >= 2
+                ):
+                    # All features from both groups contribute
+                    mapping.append(self.feature_groups[g1] + self.feature_groups[g2])
+
+        # Domain-specific composite features (6 features)
+        # These use complex combinations of multiple original features
+        # Using approximate groups based on domain knowledge
+        domain_feature_groups = [
+            self.feature_groups.get("boredom_related", []),  # boredom_ratio
+            self.feature_groups.get("confusion_related", []),  # confusion_ratio
+            self.feature_groups.get("frustration_related", []),  # frustration_ratio
+            self.feature_groups.get("engagement_related", []),  # engagement_ratio
+            self.feature_groups.get("eye", []),  # eye_asymmetry
+            self.feature_groups.get("mouth", []),  # smile_asymmetry
+        ]
+        for group in domain_feature_groups:
+            mapping.append(group if group else list(range(self.base_dim)))
+
+        # Domain-specific aggregate features (13 features)
+        # These use sophisticated combinations across multiple feature groups
+        # Conservative estimate: all features potentially contribute
+        for _ in range(13):
+            mapping.append(list(range(self.base_dim)))  # All features contribute
+
+        return mapping
 
     def get_feature_importance_report(
         self, sequences: np.ndarray, labels: np.ndarray

@@ -33,6 +33,8 @@ def run_feature_importance_analysis(
     feature_names: list,
     output_dir: str,
     config: Dict,
+    feature_engineer=None,  # Add parameter for FeatureEngineer instance
+    original_feature_names: Optional[List[str]] = None,  # Original 78D feature names
     verbose: bool = True,
 ) -> Dict:
     """
@@ -44,9 +46,11 @@ def run_feature_importance_analysis(
         X_val: Validation features
         X_test: Test features
         y_val: Dict mapping state -> validation labels
-        feature_names: List of feature names (78D MediaPipe features)
+        feature_names: List of feature names (engineered features)
         output_dir: Output directory for results
         config: Configuration dict
+        feature_engineer: FeatureEngineer instance (for mapping back to original features)
+        original_feature_names: List of original 78D feature names
         verbose: Print progress
 
     Returns:
@@ -74,6 +78,23 @@ if verbose:
         output_dir=output_dir,
         random_state=config.get("data", {}).get("random_seed", 42),
     )
+
+    # Set feature mapping for aggregation to original features
+    if feature_engineer is not None:
+        try:
+            mapping = feature_engineer.get_original_feature_mapping()
+            analyzer.set_feature_mapping(mapping)
+            if verbose:
+                print(
+                    f"  Feature mapping set: {len(mapping)} engineered -> 78 original"
+                )
+        except Exception as e:
+            if verbose:
+                print(f"  Warning: Could not get feature mapping: {e}")
+
+    # Use default original feature names if not provided
+    if original_feature_names is None and feature_engineer is not None:
+        original_feature_names = feature_engineer.feature_names
 
     # Initialize visualizer
     plots_dir = Path(output_dir) / "plots"
@@ -127,6 +148,62 @@ if verbose:
     validation_report = analyzer.validate_feature_importance(
         top_k=fi_config.get("top_k", 50), verbose=verbose
     )
+
+    # Aggregate importance back to original features if mapping available
+    original_feature_importance = {}
+    if analyzer.feature_mapping is not None and original_feature_names is not None:
+        if verbose:
+            print("\n[Aggregating to Original Features]")
+            print(
+                f"  Mapping {len(analyzer.feature_mapping)} engineered features to {len(original_feature_names)} original features"
+            )
+
+        for state in models.keys():
+            if state not in shap_dfs or shap_dfs[state] is None:
+                continue
+
+            # Get importance scores for this state
+            if "importance" in shap_dfs[state].columns:
+                shap_scores = shap_dfs[state]["importance"].values
+            elif "mean_abs_importance" in shap_dfs[state].columns:
+                shap_scores = shap_dfs[state]["mean_abs_importance"].values
+            else:
+                continue
+
+            # Aggregate to original features
+            try:
+                original_importance = analyzer.aggregate_to_original_features(
+                    shap_scores, method="mean"
+                )
+
+                # Create DataFrame
+                original_df = pd.DataFrame(
+                    {
+                        "feature": original_feature_names[: len(original_importance)],
+                        "importance": original_importance,
+                    }
+                ).sort_values("importance", ascending=False)
+
+                original_feature_importance[state] = original_df
+
+                if verbose:
+                    print(f"\n  [{state.upper()}] Top 10 Original Features:")
+                    for i, row in original_df.head(10).iterrows():
+                        print(f"    {row['feature']:<30} {row['importance']:.4f}")
+            except Exception as e:
+                if verbose:
+                    print(f"  Warning: Could not aggregate for {state}: {e}")
+
+    # Save original feature importance reports
+    if original_feature_importance:
+        orig_dir = Path(output_dir) / "original_features"
+        orig_dir.mkdir(parents=True, exist_ok=True)
+
+        for state, df in original_feature_importance.items():
+            filepath = orig_dir / f"{state}_original_importance.csv"
+            df.to_csv(filepath, index=False)
+            if verbose:
+                print(f"  Saved: {filepath}")
 
     # Generate visualizations
     if fi_config.get("generate_plots", True):

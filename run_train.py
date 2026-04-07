@@ -1861,24 +1861,39 @@ def main():
             print("\n" + "=" * 70)
             print("FEATURE IMPORTANCE ANALYSIS (Two-Stage)")
             print("=" * 70)
-        
+
             from analysis.feature_importance_integration import (
-        run_feature_importance_analysis,
+                run_feature_importance_analysis,
             )
-        
+
             # Prepare models dict for analyzer
             xgb_models = {state: xgb_model.models[state] for state in AFFECTIVE_STATES}
-        
+
             # Prepare validation labels dict
             y_val_dict = {state: y_val[state] for state in AFFECTIVE_STATES}
-        
+
             # Use the features that models were trained on (engineered + selected)
             # NOT the original 78D features, since models expect engineered features
-            print(f"Using features that models were trained on: {X_train_final.shape[1]} features")
-            
+            print(
+                f"Using features that models were trained on: {X_train_final.shape[1]} features"
+            )
+
             # Create generic feature names for engineered features
-            engineered_feature_names = [f"feature_{i}" for i in range(X_train_final.shape[1])]
-        
+            engineered_feature_names = [
+                f"feature_{i}" for i in range(X_train_final.shape[1])
+            ]
+
+            # Create FeatureEngineer instance for mapping back to original features
+            feature_engineer = None
+            if fe_cfg.get("enabled", True):
+                try:
+                    feature_engineer = FeatureEngineer(feature_names)
+                    print(
+                        f"Created FeatureEngineer for mapping: {len(feature_names)} original features"
+                    )
+                except Exception as e:
+                    print(f"Warning: Could not create FeatureEngineer: {e}")
+
         # Run analysis
         fi_output_dir = run_dir / "feature_importance"
         fi_results = run_feature_importance_analysis(
@@ -1890,11 +1905,13 @@ def main():
             feature_names=engineered_feature_names,
             output_dir=str(fi_output_dir),
             config=cfg,
+            feature_engineer=feature_engineer,
+            original_feature_names=feature_names,
             verbose=True,
         )
-        
+
         print(f"\n✓ Feature importance analysis saved to: {fi_output_dir}")
-        
+
         # No epoch-based training curves — skip
         history = {}
 
