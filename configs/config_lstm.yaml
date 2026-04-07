@@ -45,6 +45,11 @@ loss:
   use_dynamic_task_weights: true  # Enable dynamic weighting (recommended)
   focal_gamma: 2.0                 # Focal loss gamma parameter
 
+# --- Threshold Optimization (Phase 2) ---
+threshold_optimization:
+  enabled: true                    # Enable cost-sensitive threshold optimization
+  metric: "f1_macro"              # Metric to optimize (f1_macro, f1_weighted, accuracy)
+
 # --- Training ---
 training:
   batch_size: 32

@@ -66,6 +66,7 @@ from model.lstm_model import (
     EngagementLSTM,
     MultiTaskLoss,
     DynamicTaskWeightedLoss,
+    CostSensitiveThresholdOptimizer,
     get_model_summary,
 )
 from model.xgboost_model import EngagementXGBoost
@@ -1574,15 +1575,80 @@ def main():
             X_train, y_train, X_val, y_val, cfg, run_dir, device
         )
 
-        # Predict on test
-        eval_cfg = cfg.get("evaluation", {})
-        all_preds, all_probs = predict_lstm(
-            model,
-            X_test,
-            y_test,
-            device,
-            batch_size=eval_cfg.get("batch_size", 64),
-        )
+        # Threshold optimization (Phase2 improvement)
+        threshold_cfg = cfg.get("threshold_optimization", {})
+        use_threshold_opt = threshold_cfg.get("enabled", True)
+
+        if use_threshold_opt:
+            print("\n" + "=" * 70)
+            print("THRESHOLD OPTIMIZATION (Phase 2)")
+            print("=" * 70)
+
+            # Get validation predictions
+            eval_cfg = cfg.get("evaluation", {})
+            val_preds, val_probs = predict_lstm(
+                model,
+                X_val,
+                y_val,
+                device,
+                batch_size=eval_cfg.get("batch_size", 64),
+            )
+
+            # Optimize thresholds on validation set
+            threshold_optimizer = CostSensitiveThresholdOptimizer(
+                num_classes=cfg["model"].get("num_classes", 3),
+                metric=threshold_cfg.get("metric", "f1_macro"),
+            )
+
+            for state in AFFECTIVE_STATES:
+                threshold_optimizer.optimize_thresholds(
+                    y_val[state], val_probs[state], state
+                )
+
+            # Save thresholds
+            threshold_path = run_dir / "checkpoints" / "threshold_optimizer.pkl"
+            threshold_optimizer.save(str(threshold_path))
+
+            # Predict on test with optimized thresholds
+            print("\n" + "=" * 70)
+            print("TEST PREDICTIONS WITH OPTIMIZED THRESHOLDS")
+            print("=" * 70)
+
+            test_ds = AffectiveDataset(X_test, y_test)
+            test_loader = DataLoader(
+                test_ds, batch_size=eval_cfg.get("batch_size", 64), shuffle=False
+            )
+
+            all_probs = {s: [] for s in AFFECTIVE_STATES}
+            model.eval()
+            with torch.no_grad():
+                for X_batch, _ in tqdm(
+                    test_loader, desc="Predicting (test)", leave=False
+                ):
+                    X_batch = X_batch.to(device)
+                    outputs, _ = model(X_batch)
+                    for s in AFFECTIVE_STATES:
+                        probs = torch.softmax(outputs[s], dim=1).cpu().numpy()
+                        all_probs[s].append(probs)
+
+            all_probs = {
+                s: np.concatenate(all_probs[s], axis=0) for s in AFFECTIVE_STATES
+            }
+
+            # Apply optimized thresholds
+            all_preds = {}
+            for state in AFFECTIVE_STATES:
+                all_preds[state] = threshold_optimizer.predict(all_probs[state], state)
+        else:
+            # Standard argmax predictions
+            eval_cfg = cfg.get("evaluation", {})
+            all_preds, all_probs = predict_lstm(
+                model,
+                X_test,
+                y_test,
+                device,
+                batch_size=eval_cfg.get("batch_size", 64),
+            )
 
         # Plot training curves
         plot_training_curves(history, run_dir)
