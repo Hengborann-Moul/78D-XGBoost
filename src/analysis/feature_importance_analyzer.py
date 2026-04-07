@@ -153,87 +153,85 @@ class FeatureImportanceAnalyzer:
     ]
 
 
-def __init__(
-    self,
-    feature_names: Optional[List[str]] = None,
-    output_dir: str = "feature_importance",
-    random_state: int = 42,
-):
-    self.feature_names = feature_names if feature_names else self.ORIGINAL_FEATURE_NAMES
-    self.output_dir = Path(output_dir)
-    self.output_dir.mkdir(parents=True, exist_ok=True)
-    self.random_state = random_state
+    def __init__(
+        self,
+        feature_names: Optional[List[str]] = None,
+        output_dir: str = "feature_importance",
+        random_state: int = 42,
+    ):
+        self.feature_names = feature_names if feature_names else self.ORIGINAL_FEATURE_NAMES
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.random_state = random_state
 
-    # Storage for results
-    self.shap_values = {}
-    self.shap_importance = {}
-    self.perm_importance = {}
-    self.validation_report = {}
+        # Storage for results
+        self.shap_values = {}
+        self.shap_importance = {}
+        self.perm_importance = {}
+        self.validation_report = {}
 
-    # Mapping from engineered to original features (if available)
-    self.feature_mapping = None  # Will be set by set_feature_mapping()
+        # Mapping from engineered to original features (if available)
+        self.feature_mapping = None  # Will be set by set_feature_mapping()
 
+    def set_feature_mapping(self, mapping: List[List[int]]):
+        """
+        Set the mapping from engineered features to original features.
+        
+        This is required for aggregating importance scores back to original features.
+        
+        Args:
+            mapping: List where mapping[i] contains indices of original features
+                     that contribute to engineered feature i
+        """
+        self.feature_mapping = mapping
 
-def set_feature_mapping(self, mapping: List[List[int]]):
-    """
-    Set the mapping from engineered features to original features.
-
-    This is required for aggregating importance scores back to original features.
-
-    Args:
-        mapping: List where mapping[i] contains indices of original features
-                 that contribute to engineered feature i
-    """
-    self.feature_mapping = mapping
-
-
-def aggregate_to_original_features(
-    self, importance_scores: np.ndarray, method: str = "sum"
-) -> np.ndarray:
-    """
-    Aggregate importance scores from engineered features to original features.
-
-    Args:
-        importance_scores: Array of shape (n_engineered,) with importance scores
-        method: Aggregation method - 'sum', 'mean', 'max'
-
-    Returns:
-        original_importance: Array of shape (78,) with aggregated importance
-    """
-    if self.feature_mapping is None:
-        raise ValueError("Feature mapping not set. Call set_feature_mapping() first.")
-
-    if len(importance_scores) != len(self.feature_mapping):
-        raise ValueError(
-            f"Importance scores length ({len(importance_scores)}) doesn't match "
-            f"feature mapping length ({len(self.feature_mapping)})"
-        )
-
-    # Initialize original feature importance
-    original_importance = np.zeros(78)
-
-    # Aggregate contributions
-    for eng_idx, importance in enumerate(importance_scores):
-        orig_indices = self.feature_mapping[eng_idx]
-        if len(orig_indices) == 0:
-            continue
-
-        if method == "sum":
-            # Sum importance to all contributing original features
-            for orig_idx in orig_indices:
-                original_importance[orig_idx] += importance
-        elif method == "mean":
-            # Distribute importance equally among contributors
-            contribution = importance / len(orig_indices)
-            for orig_idx in orig_indices:
-                original_importance[orig_idx] += contribution
-        elif method == "max":
-            # Assign to primary contributor only
-            original_importance[orig_indices[0]] = max(
-                original_importance[orig_indices[0]], importance
+    def aggregate_to_original_features(
+        self, importance_scores: np.ndarray, method: str = "sum"
+    ) -> np.ndarray:
+        """
+        Aggregate importance scores from engineered features to original features.
+        
+        Args:
+            importance_scores: Array of shape (n_engineered,) with importance scores
+            method: Aggregation method - 'sum', 'mean', 'max'
+            
+        Returns:
+            original_importance: Array of shape (78,) with aggregated importance
+        """
+        if self.feature_mapping is None:
+            raise ValueError("Feature mapping not set. Call set_feature_mapping() first.")
+        
+        if len(importance_scores) != len(self.feature_mapping):
+            raise ValueError(
+                f"Importance scores length ({len(importance_scores)}) doesn't match "
+                f"feature mapping length ({len(self.feature_mapping)})"
             )
-
-    return original_importance
+        
+        # Initialize original feature importance
+        original_importance = np.zeros(78)
+        
+        # Aggregate contributions
+        for eng_idx, importance in enumerate(importance_scores):
+            orig_indices = self.feature_mapping[eng_idx]
+            if len(orig_indices) == 0:
+                continue
+            
+            if method == "sum":
+                # Sum importance to all contributing original features
+                for orig_idx in orig_indices:
+                    original_importance[orig_idx] += importance
+            elif method == "mean":
+                # Distribute importance equally among contributors
+                contribution = importance / len(orig_indices)
+                for orig_idx in orig_indices:
+                    original_importance[orig_idx] += contribution
+            elif method == "max":
+                # Assign to primary contributor only
+                original_importance[orig_indices[0]] = max(
+                    original_importance[orig_indices[0]], importance
+                )
+        
+        return original_importance
 
     def compute_shap_values(
         self,
