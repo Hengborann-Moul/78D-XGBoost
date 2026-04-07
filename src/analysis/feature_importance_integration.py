@@ -60,12 +60,13 @@ def run_feature_importance_analysis(
             print("\nFeature importance analysis disabled. Skipping...")
         return {}
 
-    if verbose:
-        print("\n" + "=" * 80)
-        print("TWO-STAGE FEATURE IMPORTANCE ANALYSIS")
-        print("=" * 80)
-        print(f"Feature type: Original 78D MediaPipe features")
-        print(f"Output directory: {output_dir}")
+
+if verbose:
+    print("\n" + "=" * 80)
+    print("TWO-STAGE FEATURE IMPORTANCE ANALYSIS")
+    print("=" * 80)
+    print(f"Feature dimension: {X_train.shape[1]}")
+    print(f"Output directory: {output_dir}")
 
     # Initialize analyzer
     analyzer = FeatureImportanceAnalyzer(

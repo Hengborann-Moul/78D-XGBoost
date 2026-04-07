@@ -1855,50 +1855,43 @@ def main():
 
         all_preds, all_probs = predict_xgboost(xgb_model, X_test_final)
 
-        # Feature Importance Analysis (Two-Stage: SHAP + Permutation)
-        fi_cfg = cfg.get("feature_importance", {})
-        if fi_cfg.get("enabled", False):
-            print("\n" + "=" * 70)
-            print("FEATURE IMPORTANCE ANALYSIS (Two-Stage)")
-            print("=" * 70)
+# Feature Importance Analysis (Two-Stage: SHAP + Permutation)
+fi_cfg = cfg.get("feature_importance", {})
+if fi_cfg.get("enabled", False):
+    print("\n" + "=" * 70)
+    print("FEATURE IMPORTANCE ANALYSIS (Two-Stage)")
+    print("=" * 70)
 
-            from analysis.feature_importance_integration import (
-                run_feature_importance_analysis,
-            )
+    from analysis.feature_importance_integration import (
+        run_feature_importance_analysis,
+    )
 
-            # Prepare models dict for analyzer
-            xgb_models = {state: xgb_model.models[state] for state in AFFECTIVE_STATES}
+    # Prepare models dict for analyzer
+    xgb_models = {state: xgb_model.models[state] for state in AFFECTIVE_STATES}
 
-            # Prepare validation labels dict
-            y_val_dict = {state: y_val[state] for state in AFFECTIVE_STATES}
+    # Prepare validation labels dict
+    y_val_dict = {state: y_val[state] for state in AFFECTIVE_STATES}
 
-            # Use original 78D features (before feature engineering)
-            # For feature importance analysis, we focus on the base MediaPipe features
-            X_train_original = (
-                np.array(X_train)[:, :78]
-                if X_train.shape[-1] >= 78
-                else np.array(X_train)
-            )
-            X_val_original = (
-                np.array(X_val)[:, :78] if X_val.shape[-1] >= 78 else np.array(X_val)
-            )
-            X_test_original = (
-                np.array(X_test)[:, :78] if X_test.shape[-1] >= 78 else np.array(X_test)
-            )
+    # Use the features that models were trained on (engineered + selected)
+    # NOT the original 78D features, since models expect engineered features
+    print(f"Using features that models were trained on: {X_train_final.shape[1]} features")
+    
+    # Create generic feature names for engineered features
+    engineered_feature_names = [f"feature_{i}" for i in range(X_train_final.shape[1])]
 
-            # Run analysis
-            fi_output_dir = run_dir / "feature_importance"
-            fi_results = run_feature_importance_analysis(
-                models=xgb_models,
-                X_train=X_train_original,
-                X_val=X_val_original,
-                X_test=X_test_original,
-                y_val=y_val_dict,
-                feature_names=feature_names[:78],  # Original 78D feature names
-                output_dir=str(fi_output_dir),
-                config=cfg,
-                verbose=True,
-            )
+    # Run analysis
+    fi_output_dir = run_dir / "feature_importance"
+    fi_results = run_feature_importance_analysis(
+        models=xgb_models,
+        X_train=X_train_final,
+        X_val=X_val_final,
+        X_test=X_test_final,
+        y_val=y_val_dict,
+        feature_names=engineered_feature_names,
+        output_dir=str(fi_output_dir),
+        config=cfg,
+        verbose=True,
+    )
 
             print(f"\n✓ Feature importance analysis saved to: {fi_output_dir}")
 
