@@ -50,6 +50,16 @@ threshold_optimization:
   enabled: true                    # Enable cost-sensitive threshold optimization
   metric: "f1_macro"              # Metric to optimize (f1_macro, f1_weighted, accuracy)
 
+# --- Contrastive Pre-training (Phase 3) ---
+contrastive_pretraining:
+  enabled: false                  # Enable temporal contrastive pre-training (Phase 3)
+  pretrain_epochs: 15            # Number of pre-training epochs
+  temperature: 0.1               # NT-Xent temperature parameter
+  projection_dim: 64             # Projection head dimension
+  learning_rate: 0.0001         # Pre-training learning rate
+  batch_size: 64                 # Pre-training batch size
+  num_negatives: 8              # Number of negative samples per anchor
+
 # --- Training ---
 training:
   batch_size: 32
