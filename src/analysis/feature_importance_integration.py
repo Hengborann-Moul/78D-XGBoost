@@ -9,7 +9,7 @@ Date: 2026-04-07
 import sys
 import warnings
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
