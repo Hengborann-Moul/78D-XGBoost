@@ -860,8 +860,9 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
     return (
         xgb_model,
         X_train_final,
+        X_val_final,
         selector,
-    )  # return selector for later use with test set
+    )  # return selector and final features for later use
 
 
 # ---------------------------------------------------------------------------
@@ -1832,7 +1833,7 @@ def main():
         fe_cfg = cfg.get("feature_engineering", {})
         fs_cfg = cfg.get("feature_selection", {})
 
-        xgb_model, X_train_eng, selector = train_xgboost(
+        xgb_model, X_train_final, X_val_final, selector = train_xgboost(
             X_train, y_train, X_val, y_val, cfg, run_dir, feature_names
         )
 
