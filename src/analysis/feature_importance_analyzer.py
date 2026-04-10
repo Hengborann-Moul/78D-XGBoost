@@ -152,14 +152,15 @@ class FeatureImportanceAnalyzer:
         "tension",
     ]
 
-
     def __init__(
         self,
         feature_names: Optional[List[str]] = None,
         output_dir: str = "feature_importance",
         random_state: int = 42,
     ):
-        self.feature_names = feature_names if feature_names else self.ORIGINAL_FEATURE_NAMES
+        self.feature_names = (
+            feature_names if feature_names else self.ORIGINAL_FEATURE_NAMES
+        )
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.random_state = random_state
@@ -176,9 +177,9 @@ class FeatureImportanceAnalyzer:
     def set_feature_mapping(self, mapping: List[List[int]]):
         """
         Set the mapping from engineered features to original features.
-        
+
         This is required for aggregating importance scores back to original features.
-        
+
         Args:
             mapping: List where mapping[i] contains indices of original features
                      that contribute to engineered feature i
@@ -190,32 +191,34 @@ class FeatureImportanceAnalyzer:
     ) -> np.ndarray:
         """
         Aggregate importance scores from engineered features to original features.
-        
+
         Args:
             importance_scores: Array of shape (n_engineered,) with importance scores
             method: Aggregation method - 'sum', 'mean', 'max'
-            
+
         Returns:
             original_importance: Array of shape (78,) with aggregated importance
         """
         if self.feature_mapping is None:
-            raise ValueError("Feature mapping not set. Call set_feature_mapping() first.")
-        
+            raise ValueError(
+                "Feature mapping not set. Call set_feature_mapping() first."
+            )
+
         if len(importance_scores) != len(self.feature_mapping):
             raise ValueError(
                 f"Importance scores length ({len(importance_scores)}) doesn't match "
                 f"feature mapping length ({len(self.feature_mapping)})"
             )
-        
+
         # Initialize original feature importance
         original_importance = np.zeros(78)
-        
+
         # Aggregate contributions
         for eng_idx, importance in enumerate(importance_scores):
             orig_indices = self.feature_mapping[eng_idx]
             if len(orig_indices) == 0:
                 continue
-            
+
             if method == "sum":
                 # Sum importance to all contributing original features
                 for orig_idx in orig_indices:
@@ -230,7 +233,7 @@ class FeatureImportanceAnalyzer:
                 original_importance[orig_indices[0]] = max(
                     original_importance[orig_indices[0]], importance
                 )
-        
+
         return original_importance
 
     def compute_shap_values(
@@ -317,42 +320,74 @@ class FeatureImportanceAnalyzer:
 
             # Create TreeExplainer
             try:
-                # For XGBoost models, don't pass background data (use built-in)
-                # Newer SHAP versions require proper masker or None for tree models
+                # Use model_output="raw" (log-odds) as it's the most reliable mode
+                # Probability output requires interventional perturbation with background data
                 explainer = shap.TreeExplainer(
                     model,
-                    data=None,  # Use built-in background for XGBoost
+                    data=None,
                     feature_names=self.feature_names[: X_explain_2d.shape[1]],
-                    model_output="probability",
+                    model_output="raw",
                 )
 
                 # Compute SHAP values
                 shap_vals = explainer.shap_values(X_explain_2d, check_additivity=False)
 
-                # Handle multi-class output (list of arrays per class)
+                # Validate SHAP values are not all zero
+                # XGBoost can return:
+                # - 2D array (N, features) for binary classification
+                # - 3D array (N, features, n_classes) for multi-class
+                # - List of 2D arrays for some versions
                 if isinstance(shap_vals, list):
-                    # Average across classes for overall feature importance
-                    shap_vals_mean = np.mean([np.abs(s) for s in shap_vals], axis=0)
-                    self.shap_values[state] = {
-                        "per_class": shap_vals,  # List of (N, features) per class
-                        "mean_abs": shap_vals_mean,  # (N, features)
-                        "X_explain": X_explain_2d,
-                    }
+                    # List of (N, features) per class - stack to 3D
+                    shap_vals_array = np.stack(
+                        shap_vals, axis=-1
+                    )  # (N, features, n_classes)
+                    shap_vals_mean = np.mean(
+                        np.abs(shap_vals_array), axis=-1
+                    )  # (N, features)
+                elif shap_vals.ndim == 3:
+                    # 3D array (N, features, n_classes) - mean across classes
+                    shap_vals_mean = np.mean(
+                        np.abs(shap_vals), axis=-1
+                    )  # (N, features)
                 else:
-                    # Binary classification
-                    self.shap_values[state] = {
-                        "per_class": [shap_vals],
-                        "mean_abs": np.abs(shap_vals),
-                        "X_explain": X_explain_2d,
-                    }
+                    # 2D array (N, features) - binary classification
+                    shap_vals_mean = np.abs(shap_vals)
 
-                if verbose:
-                    print(
-                        f"  ✓ SHAP values computed: shape {shap_vals_mean.shape if isinstance(shap_vals, list) else shap_vals.shape}"
-                    )
+                # Ensure 2D shape (N, features)
+                if shap_vals_mean.ndim == 1:
+                    shap_vals_mean = shap_vals_mean.reshape(1, -1)
+
+                if shap_vals_mean.sum() == 0:
+                    print(f"  ⚠ Warning: SHAP values are all zero for {state}")
+                    self.shap_values[state] = None
+                else:
+                    # Handle multi-class output (list of arrays per class)
+                    if isinstance(shap_vals, list):
+                        self.shap_values[state] = {
+                            "per_class": shap_vals,  # List of (N, features) per class
+                            "mean_abs": shap_vals_mean,  # (N, features)
+                            "X_explain": X_explain_2d,
+                        }
+                    else:
+                        # Binary classification
+                        self.shap_values[state] = {
+                            "per_class": [shap_vals],
+                            "mean_abs": shap_vals_mean,
+                            "X_explain": X_explain_2d,
+                        }
+
+                    if verbose:
+                        print(
+                            f"  ✓ SHAP values computed: shape {shap_vals_mean.shape}, "
+                            f"total_abs={shap_vals_mean.sum():.6f}"
+                        )
 
             except Exception as e:
                 print(f"  ✗ Error computing SHAP for {state}: {e}")
+                import traceback
+
+                traceback.print_exc()
                 self.shap_values[state] = None
 
         if verbose:
@@ -390,17 +425,38 @@ class FeatureImportanceAnalyzer:
             # Use mean absolute SHAP values
             mean_abs_shap = shap_data["mean_abs"]  # (N, features)
 
+            # Ensure mean_abs_shap is 2D (samples, features)
+            if mean_abs_shap.ndim == 1:
+                mean_abs_shap = mean_abs_shap.reshape(1, -1)
+            elif mean_abs_shap.ndim > 2:
+                # Flatten extra dimensions
+                mean_abs_shap = mean_abs_shap.reshape(mean_abs_shap.shape[0], -1)
+
             # Compute global feature importance
             global_importance = np.mean(mean_abs_shap, axis=0)  # (features,)
+            importance_std = np.std(mean_abs_shap, axis=0)  # (features,)
+
+            # Ensure 1D arrays
+            global_importance = np.asarray(global_importance).flatten()
+            importance_std = np.asarray(importance_std).flatten()
 
             # Create DataFrame
             n_features = len(global_importance)
+
+            # Ensure all arrays have the same length
+            feature_names_trimmed = self.feature_names[:n_features]
+            if len(feature_names_trimmed) < n_features:
+                # Pad feature names if needed
+                feature_names_trimmed = feature_names_trimmed + [
+                    f"feat_{i}" for i in range(len(feature_names_trimmed), n_features)
+                ]
+
             df = pd.DataFrame(
                 {
                     "feature_index": range(n_features),
-                    "feature_name": self.feature_names[:n_features],
+                    "feature_name": feature_names_trimmed,
                     "importance": global_importance,
-                    "importance_std": np.std(mean_abs_shap, axis=0),
+                    "importance_std": importance_std,
                 }
             )
 
@@ -647,8 +703,41 @@ class FeatureImportanceAnalyzer:
         """
         Get feature group name for a given feature index.
 
+        When feature_mapping is set (engineered features), uses the mapping
+        to determine which original features contribute and assigns groups
+        accordingly. Features deriving from multiple groups are labeled
+        'cross_group'.
+
+        When feature_mapping is not set (original 78D features), uses the
+        index-based group assignment directly.
+
         Args:
             feature_idx: Feature index
+
+        Returns:
+            group_name: Feature group name
+        """
+        if self.feature_mapping is not None and feature_idx < len(self.feature_mapping):
+            orig_indices = self.feature_mapping[feature_idx]
+            if not orig_indices:
+                return "unknown"
+            groups_found = set()
+            for orig_idx in orig_indices:
+                groups_found.add(self._get_original_feature_group(orig_idx))
+            groups_found.discard("unknown")
+            if len(groups_found) == 1:
+                return groups_found.pop()
+            elif len(groups_found) > 1:
+                return "cross_group"
+            return "unknown"
+        return self._get_original_feature_group(feature_idx)
+
+    def _get_original_feature_group(self, feature_idx: int) -> str:
+        """
+        Get feature group name for an original 78D feature index.
+
+        Args:
+            feature_idx: Original feature index (0-77)
 
         Returns:
             group_name: Feature group name
@@ -657,6 +746,18 @@ class FeatureImportanceAnalyzer:
             if feature_idx in group_info["indices"]:
                 return group_name
         return "unknown"
+
+    def get_feature_groups_list(self, n_features: int) -> List[str]:
+        """
+        Get list of feature group names for all features.
+
+        Args:
+            n_features: Number of features
+
+        Returns:
+            groups: List of group names, one per feature
+        """
+        return [self._get_feature_group(i) for i in range(n_features)]
 
     def save_results(self, verbose: bool = True) -> None:
         """
@@ -722,9 +823,10 @@ class FeatureImportanceAnalyzer:
     def _aggregate_importance_by_group(
         self, df: pd.DataFrame, importance_col: str
     ) -> Dict:
-        """Aggregate importance by feature groups."""
+        """Aggregate importance by feature groups, including cross_group."""
+        all_groups = list(self.FEATURE_GROUPS.keys()) + ["cross_group"]
         groups = {}
-        for group_name in self.FEATURE_GROUPS.keys():
+        for group_name in all_groups:
             group_df = df[df["feature_group"] == group_name]
             if len(group_df) > 0:
                 groups[group_name] = {

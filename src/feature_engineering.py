@@ -631,14 +631,17 @@ class FeatureEngineer:
             for suf in freq_suffixes:
                 names.append(f"{base}_{suf}")
 
-        group_names = list(self.feature_groups.keys())
-        for i, g1 in enumerate(group_names):
-            for g2 in group_names[i + 1 :]:
-                if (
-                    len(self.feature_groups[g1]) >= 2
-                    and len(self.feature_groups[g2]) >= 2
-                ):
-                    names.append(f"corr_{g1}_{g2}")
+        # Must use the SAME iteration pattern as _compute_interaction_features
+        # (string comparison g1 >= g2), NOT index-based i/j iteration
+        for g1_name, g1_indices in self.feature_groups.items():
+            if len(g1_indices) < 2:
+                continue
+            for g2_name, g2_indices in self.feature_groups.items():
+                if g1_name >= g2_name:
+                    continue
+                if len(g2_indices) < 2:
+                    continue
+                names.append(f"corr_{g1_name}_{g2_name}")
 
         names.extend(
             [
@@ -711,15 +714,17 @@ class FeatureEngineer:
 
         # Interaction features: Correlations between feature groups
         # Each correlation uses ALL features from both groups
-        group_names = list(self.feature_groups.keys())
-        for i, g1 in enumerate(group_names):
-            for g2 in group_names[i + 1 :]:
-                if (
-                    len(self.feature_groups[g1]) >= 2
-                    and len(self.feature_groups[g2]) >= 2
-                ):
-                    # All features from both groups contribute
-                    mapping.append(self.feature_groups[g1] + self.feature_groups[g2])
+        # Must use the SAME iteration pattern as _compute_interaction_features
+        # (string comparison g1 >= g2), NOT index-based i/j iteration
+        for g1_name, g1_indices in self.feature_groups.items():
+            if len(g1_indices) < 2:
+                continue
+            for g2_name, g2_indices in self.feature_groups.items():
+                if g1_name >= g2_name:
+                    continue
+                if len(g2_indices) < 2:
+                    continue
+                mapping.append(g1_indices + g2_indices)
 
         # Domain-specific composite features (6 features)
         # These use complex combinations of multiple original features

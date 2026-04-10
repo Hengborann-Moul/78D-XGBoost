@@ -1895,23 +1895,36 @@ def main():
                 except Exception as e:
                     print(f"Warning: Could not create FeatureEngineer: {e}")
 
-        # Run analysis
-        fi_output_dir = run_dir / "feature_importance"
-        fi_results = run_feature_importance_analysis(
-            models=xgb_models,
-            X_train=X_train_final,
-            X_val=X_val_final,
-            X_test=X_test_final,
-            y_val=y_val_dict,
-            feature_names=engineered_feature_names,
-            output_dir=str(fi_output_dir),
-            config=cfg,
-            feature_engineer=feature_engineer,
-            original_feature_names=feature_names,
-            verbose=True,
-        )
+            # Get selected feature indices if feature selection was applied
+            fi_selected_indices = None
+            if selector is not None and fs_cfg.get("enabled", False):
+                if (
+                    hasattr(selector, "selected_indices")
+                    and selector.selected_indices is not None
+                ):
+                    fi_selected_indices = selector.selected_indices
+                    print(
+                        f"Feature selection applied: {len(fi_selected_indices)} selected indices"
+                    )
 
-        print(f"\n✓ Feature importance analysis saved to: {fi_output_dir}")
+            # Run analysis
+            fi_output_dir = run_dir / "feature_importance"
+            fi_results = run_feature_importance_analysis(
+                models=xgb_models,
+                X_train=X_train_final,
+                X_val=X_val_final,
+                X_test=X_test_final,
+                y_val=y_val_dict,
+                feature_names=engineered_feature_names,
+                output_dir=str(fi_output_dir),
+                config=cfg,
+                feature_engineer=feature_engineer,
+                original_feature_names=feature_names,
+                selected_indices=fi_selected_indices,
+                verbose=True,
+            )
+
+            print(f"\n✓ Feature importance analysis saved to: {fi_output_dir}")
 
         # No epoch-based training curves — skip
         history = {}

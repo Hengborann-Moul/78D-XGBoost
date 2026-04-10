@@ -33,8 +33,9 @@ def run_feature_importance_analysis(
     feature_names: list,
     output_dir: str,
     config: Dict,
-    feature_engineer=None,  # Add parameter for FeatureEngineer instance
-    original_feature_names: Optional[List[str]] = None,  # Original 78D feature names
+    feature_engineer=None,
+    original_feature_names: Optional[List[str]] = None,
+    selected_indices: Optional[np.ndarray] = None,
     verbose: bool = True,
 ) -> Dict:
     """
@@ -51,6 +52,8 @@ def run_feature_importance_analysis(
         config: Configuration dict
         feature_engineer: FeatureEngineer instance (for mapping back to original features)
         original_feature_names: List of original 78D feature names
+        selected_indices: Array of indices of engineered features that were selected
+                         (None if no feature selection was applied)
         verbose: Print progress
 
     Returns:
@@ -81,12 +84,22 @@ def run_feature_importance_analysis(
     # Set feature mapping for aggregation to original features
     if feature_engineer is not None:
         try:
-            mapping = feature_engineer.get_original_feature_mapping()
-            analyzer.set_feature_mapping(mapping)
-            if verbose:
-                print(
-                    f"  Feature mapping set: {len(mapping)} engineered -> 78 original"
-                )
+            full_mapping = feature_engineer.get_original_feature_mapping()
+            if selected_indices is not None:
+                filtered_mapping = [full_mapping[i] for i in selected_indices]
+                analyzer.set_feature_mapping(filtered_mapping)
+                if verbose:
+                    print(
+                        f"  Feature mapping set: {len(filtered_mapping)} selected -> "
+                        f"{len(full_mapping)} total engineered -> 78 original "
+                        f"(filtered by {len(selected_indices)} selected indices)"
+                    )
+            else:
+                analyzer.set_feature_mapping(full_mapping)
+                if verbose:
+                    print(
+                        f"  Feature mapping set: {len(full_mapping)} engineered -> 78 original"
+                    )
         except Exception as e:
             if verbose:
                 print(f"  Warning: Could not get feature mapping: {e}")
@@ -158,16 +171,22 @@ def run_feature_importance_analysis(
             )
 
         for state in models.keys():
-            if state not in shap_dfs or shap_dfs[state] is None:
+            full_shap_df = analyzer.shap_importance.get(state)
+            if full_shap_df is None:
                 continue
 
-            # Get importance scores for this state
-            if "importance" in shap_dfs[state].columns:
-                shap_scores = shap_dfs[state]["importance"].values
-            elif "mean_abs_importance" in shap_dfs[state].columns:
-                shap_scores = shap_dfs[state]["mean_abs_importance"].values
-            else:
+            if "importance" not in full_shap_df.columns:
                 continue
+
+            # Reconstruct importance scores in ORIGINAL FEATURE-INDEX order
+            # (full_shap_df is sorted by importance descending, so we must
+            # restore the original index ordering for correct mapping)
+            n_engineered = len(analyzer.feature_mapping)
+            shap_scores = np.zeros(n_engineered)
+            for _, row in full_shap_df.iterrows():
+                feat_idx = int(row["feature_index"])
+                if feat_idx < n_engineered:
+                    shap_scores[feat_idx] = row["importance"]
 
             # Aggregate to original features
             try:
@@ -211,17 +230,21 @@ def run_feature_importance_analysis(
 
         feature_names_trimmed = feature_names[: X_train.shape[1]]
 
+        # Compute feature group assignments for visualizations
+        feature_groups_list = analyzer.get_feature_groups_list(X_train.shape[1])
+
         for state in models.keys():
             if verbose:
                 print(f"\n  [{state.upper()}]")
 
-            # SHAP summary plot
+            # SHAP summary plot (uses feature_groups for coloring)
             visualizer.plot_shap_summary(
                 shap_values=shap_values,
                 feature_names=feature_names_trimmed,
                 state=state,
                 top_k=30,
                 save=True,
+                feature_groups=feature_groups_list,
             )
 
             # Permutation importance plot
@@ -242,9 +265,12 @@ def run_feature_importance_analysis(
                 save=True,
             )
 
-        # Feature group breakdown
+        # Feature group breakdown - use FULL importance DataFrames for accurate
+        # group-level aggregation (top-k DataFrames miss many group members)
         visualizer.plot_feature_groups_breakdown(
-            shap_importance=shap_dfs, perm_importance=perm_dfs, save=True
+            shap_importance=analyzer.shap_importance,
+            perm_importance=analyzer.perm_importance,
+            save=True,
         )
 
         # Cross-state heatmap
