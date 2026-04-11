@@ -61,7 +61,9 @@ warnings.filterwarnings("ignore")
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent
 SRC_DIR = PROJECT_ROOT / "src"
+ANALYSIS_DIR = PROJECT_ROOT / "src" / "analysis"
 sys.path.insert(0, str(SRC_DIR))
+sys.path.insert(0, str(ANALYSIS_DIR))
 
 # ---------------------------------------------------------------------------
 # Heavy imports after path is configured
@@ -202,6 +204,7 @@ def make_output_dirs(cfg: dict) -> Path:
         run_dir / "checkpoints",
         run_dir / "results",
         run_dir / "plots",
+        run_dir / "feature_importance",
         *[run_dir / "evaluation" / s for s in AFFECTIVE_STATES],
     ]:
         sub.mkdir(parents=True, exist_ok=True)
@@ -1222,6 +1225,72 @@ def main():
             plot_confusion_matrices(all_preds, y_test, run_dir)
             plot_roc_curves(all_probs, y_test, run_dir)
             plot_metrics_summary(all_preds, y_test, run_dir)
+
+        # Feature Importance Analysis (Two-Stage: SHAP + Permutation)
+        fi_cfg = cfg.get("feature_importance", {})
+        if fi_cfg.get("enabled", False):
+            print("\n" + "=" * 70)
+            print("FEATURE IMPORTANCE ANALYSIS (Two-Stage)")
+            print("=" * 70)
+
+            from analysis.feature_importance_integration import (
+                run_feature_importance_analysis,
+            )
+
+            xgb_models = {state: best_model.models[state] for state in AFFECTIVE_STATES}
+
+            y_val_dict = {state: y_val[state] for state in AFFECTIVE_STATES}
+
+            print(
+                f"Using features that models were trained on: "
+                f"{X_train_sel.shape[1]} features"
+            )
+
+            engineered_feature_names = [
+                f"feature_{i}" for i in range(X_train_sel.shape[1])
+            ]
+
+            feature_engineer = None
+            fe_cfg = cfg.get("feature_engineering", {})
+            if fe_cfg.get("enabled", True):
+                try:
+                    feature_engineer = FeatureEngineer(feature_names)
+                    print(
+                        f"Created FeatureEngineer for mapping: "
+                        f"{len(feature_names)} original features"
+                    )
+                except Exception as e:
+                    print(f"Warning: Could not create FeatureEngineer: {e}")
+
+            fi_selected_indices = None
+            if _selector is not None:
+                if (
+                    hasattr(_selector, "selected_indices")
+                    and _selector.selected_indices is not None
+                ):
+                    fi_selected_indices = _selector.selected_indices
+                    print(
+                        f"Feature selection applied: "
+                        f"{len(fi_selected_indices)} selected indices"
+                    )
+
+            fi_output_dir = run_dir / "feature_importance"
+            fi_results = run_feature_importance_analysis(
+                models=xgb_models,
+                X_train=X_train_sel,
+                X_val=X_val_sel,
+                X_test=X_test_sel,
+                y_val=y_val_dict,
+                feature_names=engineered_feature_names,
+                output_dir=str(fi_output_dir),
+                config=cfg,
+                feature_engineer=feature_engineer,
+                original_feature_names=feature_names,
+                selected_indices=fi_selected_indices,
+                verbose=True,
+            )
+
+            print(f"\n✓ Feature importance analysis saved to: {fi_output_dir}")
     else:
         print("\n[--no-retrain] Skipping final model training and evaluation.")
 
