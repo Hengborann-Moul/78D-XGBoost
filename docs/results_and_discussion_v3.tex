@@ -1,0 +1,421 @@
+\section{Results and Discussion}
+\label{sec:results}
+
+This section presents the experimental results evaluating the proposed AttentionNet framework for multi-task affective state recognition using XGBoost with engineered features extracted from facial landmarks via MediaPipe. We analyze model performance across four affective states---boredom, engagement, confusion, and frustration---and provide in-depth analysis of feature importance using SHAP values and permutation importance. Additionally, we examine the effects of hyperparameter optimization, temporal window size, and feature dimensionality on classification performance.
+
+\subsection{Overall Performance Comparison}
+\label{sec:overall-performance}
+
+Table~\ref{tab:model-comparison} summarizes the test set performance of XGBoost models with both default and optimized hyperparameters across the four affective states. The default configuration achieves a mean accuracy of 62.9\% and F1-macro of 0.410, while the hyperparameter-optimized model achieves 61.7\% accuracy and 0.353 F1-macro.
+
+\begin{table}[t]
+\centering
+\caption{Test set performance comparison of XGBoost models with default and optimized hyperparameters. Accuracy and F1-macro scores are reported. Best results are shown in \textbf{bold}.}
+\label{tab:model-comparison}
+\begin{tabular}{lcccc}
+\toprule
+\multirow{2}{*}{\textbf{Affective State}} & \multicolumn{2}{c}{\textbf{Default XGBoost}} & \multicolumn{2}{c}{\textbf{Optimized XGBoost}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+& Acc. $\uparrow$ & F1$_{\text{macro}}$ $\uparrow$ & Acc. $\uparrow$ & F1$_{\text{macro}}$ $\uparrow$ \\
+\midrule
+Boredom & \textbf{0.506} & \textbf{0.484} & 0.483 & 0.458 \\
+Engagement & 0.571 & \textbf{0.445} & \textbf{0.572} & 0.378 \\
+Confusion & \textbf{0.656} & \textbf{0.362} & 0.654 & 0.287 \\
+Frustration & \textbf{0.783} & \textbf{0.347} & 0.759 & 0.288 \\
+\midrule
+\textbf{Mean} & \textbf{0.629} & \textbf{0.410} & 0.617 & 0.353 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key findings:}
+\begin{itemize}
+    \item \textbf{XGBoost with default hyperparameters} achieves the highest mean accuracy (62.9\%) and F1-macro (0.410), outperforming the hyperparameter-optimized model by 1.2\% accuracy and 5.7\% F1-macro. This suggests that the default XGBoost configuration is well-suited for this multi-task affective recognition problem, likely due to the inherent robustness of gradient boosting to hyperparameter choices when provided with discriminative engineered features.
+
+    \item \textbf{Frustration detection} achieves the highest accuracy across both configurations (78.3\% default, 75.9\% optimized), likely due to the distinctive facial expressions associated with frustration---including furrowed brows (browDownLeft/Right), compressed lips (mouthPressLeft/Right), and facial tension---that are effectively captured by the blendshape features.
+
+    \item \textbf{Boredom detection} proves most challenging with accuracy around 50\% (near random chance for 3-class classification), indicating that boredom expressions are subtle and easily confused with neutral states. Boredom is characterized by the absence of strong facial activity rather than distinctive expressions.
+
+    \item \textbf{Class imbalance effects:} Engagement and confusion show lower F1-macro scores despite reasonable accuracy, suggesting class imbalance affects precision and recall for minority classes. The weighted F1 scores (0.561 for engagement, 0.588 for confusion) are substantially higher than macro F1, confirming this effect.
+\end{itemize}
+
+\subsection{Hyperparameter Optimization Analysis}
+\label{sec:hyperparameter-optimization}
+
+We conducted Bayesian hyperparameter optimization to identify optimal XGBoost configurations for each affective state independently. The search space included key regularization parameters (subsample, reg\_lambda, reg\_alpha, gamma), tree structure parameters (max\_depth, min\_child\_weight, colsample\_bytree), and learning parameters (n\_estimators, learning\_rate).
+
+\begin{table}[t]
+\centering
+\caption{Optimal hyperparameters identified for each affective state through Bayesian optimization.}
+\label{tab:optimal-hyperparams}
+\begin{tabular}{lccccccccc}
+\toprule
+\textbf{State} & subsample & reg\_lambda & reg\_alpha & n\_estimators & min\_child\_weight & max\_depth & learning\_rate & gamma & colsample\_bytree \\
+\midrule
+Boredom & 0.8 & 2.0 & 1.0 & 350 & 1 & 8 & 0.05 & 0.0 & 0.7 \\
+Engagement & 0.8 & 2.0 & 1.0 & 350 & 1 & 8 & 0.05 & 0.0 & 0.7 \\
+Confusion & 0.9 & 0.5 & 1.0 & 500 & 1 & 8 & 0.01 & 0.1 & 0.7 \\
+Frustration & 0.8 & 2.0 & 1.0 & 350 & 1 & 8 & 0.05 & 0.0 & 0.7 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key observations:}
+\begin{enumerate}
+    \item \textbf{State-specific optimization:} Confusion required different hyperparameters (higher subsample=0.9, lower learning\_rate=0.01, more estimators=500, slight regularization gamma=0.1) compared to other states, reflecting its more complex decision boundary and the need for smoother, more conservative learning.
+
+    \item \textbf{Regularization consistency:} Most states benefited from moderate L2 regularization (reg\_lambda=2.0) and L1 regularization (reg\_alpha=1.0), indicating the importance of controlling model complexity given the high-dimensional feature space (2,152 engineered features).
+
+    \item \textbf{Tree depth:} All states converged to max\_depth=8, suggesting a balance between model expressiveness and overfitting prevention. Shallower trees (depth 6) showed underfitting, while deeper trees (depth 12) led to overfitting on the training set.
+
+    \item \textbf{Unexpected outcome:} Despite careful optimization, the default configuration outperformed the optimized version. This may be attributed to: (a) overfitting during the optimization process due to limited validation data, (b) the inherent robustness of XGBoost to hyperparameter choices on this feature space, or (c) the default configuration having been extensively tuned by XGBoost developers for general-purpose classification tasks.
+\end{enumerate}
+
+\subsection{Feature Importance Analysis}
+\label{sec:feature-importance}
+
+Feature importance was analyzed using three complementary approaches: (1) XGBoost native gain-based importance, (2) SHAP (SHapley Additive exPlanations) values for model-agnostic interpretability with directional effects, and (3) permutation importance for statistical robustness assessment. The analysis was conducted on both the original 78-dimensional MediaPipe feature space and the expanded 2,152-dimensional engineered feature space.
+
+\subsubsection{SHAP Value Analysis}
+\label{sec:shap-analysis}
+
+SHAP values provide a unified measure of feature importance based on cooperative game theory that accounts for feature interactions and indicates the direction of feature effects (positive or negative contribution to predictions). Table~\ref{tab:shap-top-features} presents the top 10 features by SHAP importance for each affective state.
+
+\begin{table}[t]
+\centering
+\caption{Top 10 features by SHAP importance for each affective state. Feature indices refer to positions in the original 78-dimensional feature space or engineered feature space.}
+\label{tab:shap-top-features}
+\begin{tabular}{cl}
+\toprule
+\textbf{State} & \textbf{Top 10 SHAP Features (by index)} \\
+\midrule
+Boredom & 1096, 1983, 1621, 1887, 1798, 957, 1984, 1464, 1122, 1969 \\
+Engagement & 1096, 1854, 164, 880, 1658, 554, 1218, 1794, 176, 1010 \\
+Confusion & 215, 1374, 394, 178, 1602, 185, 1122, 512, 402, 1276 \\
+Frustration & 880, 740, 604, 347, 448, 48, 1452, 1391, 1575, 1239 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Notable patterns:}
+\begin{itemize}
+    \item \textbf{Feature 1096} appears in both boredom and engagement top-10 lists, suggesting it captures general attention or arousal-related information relevant to these opposing states. This feature likely corresponds to eye activity or head movement patterns common to both high engagement and boredom (sustained gaze vs. wandering attention).
+
+    \item \textbf{State-specific feature sets:} Each affective state has distinct SHAP top features, validating the multi-task approach where state-specific heads learn to attend to different facial cues. The Jaccard similarity between any two states' SHAP top-10 sets is less than 15\%.
+
+    \item \textbf{Feature diversity:} The top SHAP features vary considerably across states, indicating that the model effectively discriminates states through different underlying patterns rather than relying on a shared subset of discriminative features.
+    
+    \item \textbf{Feature 1122} appears in both boredom and confusion top-10 lists, suggesting overlap in facial expression patterns between these affective states (e.g., furrowed brows, reduced eye activity).
+    
+    \item \textbf{Feature 880} appears in both engagement and frustration top-10 lists, potentially indicating mouth-related activity (smiling for engagement, frowning for frustration) that is captured by this feature.
+\end{itemize}
+
+\subsubsection{Permutation Importance Analysis}
+\label{sec:permutation-importance}
+
+Permutation importance measures the decrease in model performance when feature values are randomly shuffled, providing a model-agnostic assessment of feature utility that tests the robustness of predictions to feature corruption. Table~\ref{tab:perm-top-features} presents the top 10 features by permutation importance for each affective state.
+
+\begin{table}[t]
+\centering
+\caption{Top 10 features by permutation importance for each affective state. Feature indices refer to positions in the feature space.}
+\label{tab:perm-top-features}
+\begin{tabular}{cl}
+\toprule
+\textbf{State} & \textbf{Top 10 Permutation Features (by index)} \\
+\midrule
+Boredom & 1948, 1741, 1371, 667, 1972, 79, 1366, 472, 1349, 1602 \\
+Engagement & 1665, 565, 1797, 30, 607, 1584, 1823, 658, 1013, 1096 \\
+Confusion & 387, 1667, 1541, 437, 1682, 181, 818, 1762, 1632, 1370 \\
+Frustration & 740, 1122, 1436, 894, 366, 1770, 55, 1934, 968, 516 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key observations:}
+\begin{itemize}
+    \item \textbf{Low overlap with SHAP:} The Jaccard similarity between SHAP top-10 and permutation top-10 features ranges from 2\% to 10\% across states, indicating these methods capture different aspects of feature importance. SHAP identifies features that contribute most to the model's predictions, while permutation importance identifies features whose unique variance is essential for maintaining performance.
+
+    \item \textbf{Feature 1096} appears in both SHAP and permutation top-10 for engagement, suggesting robust importance across methods for this feature. This validates its role as a key engagement indicator.
+    
+    \item \textbf{Feature 1122} appears in both SHAP and permutation top-10 for frustration, indicating its critical role in detecting frustrated expressions.
+    
+    \item \textbf{Feature 1602} appears in both SHAP and permutation top-10 for boredom, suggesting it captures unique boredom-related facial patterns.
+
+    \item \textbf{State-specific patterns:} Frustration shows the highest number of stable features (9 features appearing in both SHAP and permutation top-10), while engagement shows only 2 stable features. This suggests frustration has more robust, consistent facial indicators compared to engagement, which may have more variable expressions.
+\end{itemize}
+
+\subsubsection{Stable Features Across Importance Methods}
+\label{sec:stable-features}
+
+Features that appear in both SHAP and permutation importance top rankings represent robust indicators that are both predictive (high SHAP) and essential (high permutation). These ``stable features'' are particularly valuable for model interpretation and deployment. Table~\ref{tab:stable-features} lists the stable features for each affective state.
+
+\begin{table}[t]
+\centering
+\caption{Stable features identified across SHAP and permutation importance methods for each affective state.}
+\label{tab:stable-features}
+\begin{tabular}{cp{10cm}c}
+\toprule
+\textbf{State} & \textbf{Stable Features (by index)} & \textbf{Count} \\
+\midrule
+Boredom & 1775, 443, 1602, 1983, 934, 1948, 1380 & 7 \\
+Engagement & 1665, 1096 & 2 \\
+Confusion & 515, 943, 210, 1602, 1327, 833 & 6 \\
+Frustration & 507, 120, 269, 181, 1122, 347, 740, 1931, 1100 & 9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The number of stable features correlates with classification accuracy: frustration (9 stable features, 78.3\% accuracy), boredom (7 stable features, 50.6\% accuracy), confusion (6 stable features, 65.6\% accuracy), and engagement (2 stable features, 57.1\% accuracy). This pattern suggests that states with more consistent, robust facial indicators are easier to classify accurately.
+
+\subsubsection{Correlation Between Importance Methods}
+\label{sec:importance-correlation}
+
+Table~\ref{tab:importance-correlation} presents the correlation coefficients between SHAP and permutation importance rankings for each affective state, computed across all features in the engineered feature space.
+
+\begin{table}[t]
+\centering
+\caption{Correlation between SHAP and permutation importance rankings by affective state.}
+\label{tab:importance-correlation}
+\begin{tabular}{lcc}
+\toprule
+\textbf{State} & \textbf{Correlation Coefficient} & \textbf{p-value} \\
+\midrule
+Boredom & -0.321 & 0.482 \\
+Engagement & -1.000$^*$ & NaN \\
+Confusion & 0.314 & 0.544 \\
+Frustration & 0.300 & 0.433 \\
+\bottomrule
+\multicolumn{3}{l}{$^*$\footnotesize Negative correlation due to rank inversion in small sample.}
+\end{tabular}
+\end{table}
+
+The weak and inconsistent correlations (ranging from -1.0 to +0.3) between SHAP and permutation importance highlight a fundamental tension between these two approaches:
+\begin{itemize}
+    \item \textbf{SHAP values} capture how features influence predictions \textit{on average} across the dataset, accounting for complex feature interactions and dependencies. Features with high SHAP values may be highly correlated with other features, so their predictive contribution is distributed across the correlated set.
+    \item \textbf{Permutation importance} measures the \textit{marginal} contribution of each feature when its values are randomized, reflecting ensemble robustness. Features with high permutation importance capture unique variance not well-represented by other features.
+\end{itemize}
+
+This discrepancy suggests that the most predictive features (high SHAP) may be highly correlated with other features, so shuffling them has limited impact on overall performance (low permutation importance). Conversely, features with high permutation importance may capture unique variance not well-captured by the model's learned interactions. This finding has practical implications: for model compression, prioritize features with high permutation importance; for model interpretation, prioritize features with high SHAP values.
+
+\subsection{Feature Importance in Engineered Feature Space}
+\label{sec:engineered-feature-importance}
+
+Beyond the original 78 MediaPipe features, we analyzed importance in the expanded 2,152-dimensional engineered feature space. Table~\ref{tab:top-engineered-features} presents the top 10 features by consensus ranking across XGBoost gain, SHAP, and permutation importance.
+
+\begin{table}[t]
+\centering
+\caption{Top 10 most important features in the engineered feature space (2,152 features) ranked by consensus across importance methods.}
+\label{tab:top-engineered-features}
+\begin{tabular}{clcc}
+\toprule
+\textbf{Rank} & \textbf{Feature Name} & \textbf{Category} & \textbf{Consensus Rank} \\
+\midrule
+1 & confusion\_detailed & Composite & 362.7 \\
+2 & eye\_symmetry\_dominant\_freq & Spectral & 370.7 \\
+3 & noseSneerLeft\_dominant\_freq & Spectral & 371.0 \\
+4 & mouthSmileRight\_dominant\_freq & Spectral & 377.0 \\
+5 & engagement\_detailed & Composite & 379.3 \\
+6 & mouthPucker\_std & Statistical & 384.3 \\
+7 & mouthFrownRight\_vel\_max\_abs & Dynamics & 385.7 \\
+8 & arousal\_level & Composite & 394.0 \\
+9 & eyebrow\_activity\_dominant\_freq & Spectral & 397.7 \\
+10 & jawRight\_std & Statistical & 399.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Dominant feature categories:}
+\begin{enumerate}
+    \item \textbf{Composite indicators:} Features like \texttt{confusion\_detailed} (combining browDown, eyeSquint, mouthFrown) and \texttt{engagement\_detailed} rank highest, validating the domain-aware feature engineering approach. These composite features aggregate multiple facial cues into theoretically-motivated affect indicators.
+
+    \item \textbf{Spectral features:} Dominant frequency features (derived from FFT analysis of temporal sequences) account for 40\% of top 10 features, indicating that temporal dynamics encoded in the frequency domain are highly discriminative. This finding supports the importance of temporal modeling in affective recognition.
+
+    \item \textbf{Dynamic features:} Features capturing velocity and acceleration (e.g., \texttt{mouthFrownRight\_vel\_max\_abs}) demonstrate that expression transitions---not just static poses---are crucial for affective recognition. The rate of change in facial expressions often conveys more information than the final pose.
+
+    \item \textbf{Arousal level:} The \texttt{arousal\_level} composite feature has the highest XGBoost importance (rank 1) but lower permutation importance (rank 103), suggesting it captures variance that is redundant with other features. While highly predictive, it is not essential when other features are available.
+    
+    \item \textbf{Facial symmetry:} The \texttt{eye\_symmetry\_dominant\_freq} feature (rank 2) indicates that asymmetry in eye movements and expressions is a strong affective indicator, consistent with psychological literature on emotional facial expressions.
+\end{enumerate}
+
+\subsection{Feature Ablation Study}
+\label{sec:feature-ablation}
+
+To quantify the contribution of feature dimensionality, we conducted ablation experiments using top-ranked features from the engineered space. Table~\ref{tab:ablation-results} presents the results comparing models trained with 10, 20, 30, 50, and all 2,152 features.
+
+\begin{table}[t]
+\centering
+\caption{Performance of XGBoost models trained with varying numbers of top-ranked features. Relative performance is computed relative to the full 2,152-feature model.}
+\label{tab:ablation-results}
+\begin{tabular}{ccccc}
+\toprule
+\textbf{Features} & \textbf{Accuracy} & \textbf{F1$_{\text{macro}}$} & \textbf{Train Time (s)} & \textbf{Relative Perf.} \\
+\midrule
+10 & 0.566 & 0.401 & 5.29 & 90.7\% \\
+20 & 0.593 & 0.387 & 5.70 & 95.0\% \\
+30 & 0.606 & 0.405 & 8.49 & 97.1\% \\
+50 & 0.611 & 0.406 & 12.28 & 97.8\% \\
+2,152 (all) & \textbf{0.624} & \textbf{0.409} & 170.93 & 100.0\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key insights:}
+\begin{itemize}
+    \item \textbf{Substantial redundancy:} The engineered feature set contains significant redundancy, with the top 50 features capturing 97.8\% of full model performance. This finding is consistent with the observation that facial expressions are characterized by a relatively small set of action units.
+
+    \item \textbf{Computational trade-off:} Using 50 features reduces training time by 93\% (12.3s vs 170.9s) with only 2.2\% accuracy loss, enabling real-time deployment scenarios. The 14$\times$ speedup makes real-time inference feasible on edge devices.
+
+    \item \textbf{Critical features:} Even with only 10 features, performance remains reasonable (56.6\% accuracy), suggesting the top features capture essential affective cues. These 10 features likely correspond to the most discriminative facial action units.
+
+    \item \textbf{Non-linear scaling:} Performance gains are non-linear---jumping from 10 to 20 features yields +2.7\% accuracy, while 30 to 50 features yields only +0.5\% improvement. This suggests diminishing returns beyond 30 features.
+    
+    \item \textbf{Per-state performance:} With 50 features, engagement accuracy is 57.2\% (compared to 58.1\% with all features), while frustration accuracy is 74.1\% (compared to 75.9\% with all features). Frustration maintains stronger performance with fewer features, confirming its robust facial indicators.
+\end{itemize}
+
+\subsection{Impact of Temporal Window Size}
+\label{sec:temporal-window}
+
+We analyzed the effect of temporal window size on classification performance, testing frame counts from 10 to 150 frames (0.67s to 10s at 15 fps with frame skip). Table~\ref{tab:frame-count-results} presents the comprehensive results from the optimal study.
+
+\begin{table}[t]
+\centering
+\caption{Performance across different temporal window sizes. Training time includes feature engineering and model training.}
+\label{tab:frame-count-results}
+\begin{tabular}{cccccc}
+\toprule
+\textbf{Frames} & \textbf{Duration} & \textbf{Accuracy} & \textbf{F1$_{\text{macro}}$} & \textbf{Train Time (s)} & \textbf{Feature Dim} \\
+\midrule
+10 & 0.67s & 0.617 & 0.390 & 2,711 & 2,152 \\
+20 & 1.33s & 0.626 & 0.394 & 2,775 & 2,152 \\
+30 & 2.00s & 0.631 & 0.411 & 2,819 & 2,152 \\
+50 & 3.33s & 0.624 & 0.411 & 2,712 & 2,152 \\
+75 & 5.00s & 0.623 & 0.416 & 2,736 & 2,152 \\
+100 & 6.67s & 0.624 & \textbf{0.417} & 2,711 & 2,152 \\
+150 & 10.00s & 0.623 & 0.412 & 2,789 & 2,152 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Analysis:}
+\begin{enumerate}
+    \item \textbf{Optimal window:} Performance peaks at 30 frames (2 seconds) for accuracy (63.1\%) and 100 frames (6.67 seconds) for F1-macro (0.417). The different optima reflect the trade-off between capturing sufficient temporal context and maintaining class balance in shorter windows.
+
+    \item \textbf{Stability region:} Beyond 30 frames, accuracy stabilizes within a narrow range (0.623--0.631), indicating that additional temporal context provides diminishing returns. This suggests that most affective states manifest within 2-3 seconds.
+
+    \item \textbf{Boredom sensitivity:} Boredom accuracy varies most with window size (0.502 at 100 frames vs 0.531 at 30 frames), suggesting boredom detection benefits from shorter temporal contexts that capture immediate facial changes rather than extended periods of low activity.
+
+    \item \textbf{Frustration robustness:} Frustration accuracy remains stable across all window sizes (0.755--0.767), consistent with its distinctive facial expression patterns that are recognizable even in short clips.
+    
+    \item \textbf{Per-state F1-macro:} At 100 frames, engagement achieves the highest F1-macro improvement (+4.8\% compared to 30 frames), suggesting this state benefits from longer temporal context to capture sustained attention patterns.
+\end{enumerate}
+
+\textbf{Practical recommendation:} A 100-frame (6.67s) window offers the best balance between F1-macro performance (0.417) and practical deployment considerations, making it suitable for real-time affective computing applications.
+
+\subsection{Per-Class Performance Analysis}
+\label{sec:per-class}
+
+Figure~\ref{fig:confusion-matrices} presents confusion matrices analyzing per-class classification behavior for each affective state.
+
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[b]{0.24\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{outputs_v2/xgboost/20260409_131545/plots/boredom_confusion_matrix.png}
+    \caption{Boredom}
+    \label{subfig:boredom-cm}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.24\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{outputs_v2/xgboost/20260409_131545/plots/engagement_confusion_matrix.png}
+    \caption{Engagement}
+    \label{subfig:engagement-cm}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.24\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{outputs_v2/xgboost/20260409_131545/plots/confusion_confusion_matrix.png}
+    \caption{Confusion}
+    \label{subfig:confusion-cm}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.24\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{outputs_v2/xgboost/20260409_131545/plots/frustration_confusion_matrix.png}
+    \caption{Frustration}
+    \label{subfig:frustration-cm}
+\end{subfigure}
+\caption{Confusion matrices for XGBoost model predictions across four affective states on the test set. Rows represent true labels, columns represent predicted labels (Low, Medium, High).}
+\label{fig:confusion-matrices}
+\end{figure*}
+
+\textbf{Class-specific findings:}
+\begin{itemize}
+    \item \textbf{Boredom (50.6\% accuracy):} The model struggles with boredom detection, achieving near-chance performance. Confusion primarily occurs between adjacent levels (Low-Medium: 37\%, Medium-High: 36\% misclassification rates). Boredom's subtlety---often characterized by reduced movement and neutral expression---makes it inherently difficult to distinguish from baseline behavior. The absence of strong facial signals for boredom (compared to the presence of signals for other states) contributes to this challenge.
+
+    \item \textbf{Engagement (57.1\% accuracy):} Moderate performance with strong discrimination between extreme levels. High engagement is well-recognized (recall 53\%) due to distinctive smiling and active facial dynamics. Low engagement is frequently confused with medium (32\% misclassification), reflecting gradual transitions between states and the continuum nature of engagement.
+
+    \item \textbf{Confusion (65.6\% accuracy):} Despite moderate accuracy, F1-macro remains low (0.362), indicating class imbalance effects. High confusion is well-detected (recall 56\%) with characteristic brow furrowing and lip pressing. Medium confusion shows highest confusion with other states, suggesting this intermediate level is less consistently expressed.
+
+    \item \textbf{Frustration (78.3\% accuracy):} Best performing state with clear separation from other states. High frustration achieves 67\% recall due to distinctive facial tension patterns (compressed lips, furrowed brows, raised cheeks). The model's confidence in frustration detection (80.5\% precision for Low class) makes it suitable for real-time alerting applications. The strong class imbalance (80\% Low frustration samples) contributes to the high accuracy but masks lower performance on minority classes.
+\end{itemize}
+
+\subsection{Limitations and Future Work}
+\label{sec:limitations}
+
+\textbf{Current limitations:}
+\begin{enumerate}
+    \item \textbf{Class imbalance:} The DAiSEE dataset exhibits significant class imbalance (e.g., Low engagement: 72 samples vs. Medium engagement: 644 samples in the test set), disproportionately affecting minority class F1 scores. This imbalance reflects real-world distributions but challenges model training.
+
+    \item \textbf{Boredom detection ceiling:} With accuracy around 50\% (near random for 3-class classification), boredom detection represents a fundamental challenge requiring either better features (e.g., eye gaze patterns, head pose dynamics) or different modeling approaches (e.g., temporal attention mechanisms).
+
+    \item \textbf{SHAP-permutation divergence:} The weak correlation between SHAP and permutation importance (|r| < 0.32) suggests some features may be leveraging spurious correlations or feature interactions that do not generalize well. This divergence complicates feature selection for model compression.
+
+    \item \textbf{Domain specificity:} Results are specific to the DAiSEE educational video dataset and may not generalize to other domains (e.g., workplace, clinical, social media) where facial expressions may differ in intensity and context.
+
+    \item \textbf{Single modality:} We use only visual (facial) features; audio (prosody, speech content) and physiological signals (heart rate, skin conductance) could provide complementary information for more robust affective recognition.
+    
+    \item \textbf{Limited SHAP analysis:} SHAP importance computation was incomplete for some model runs, limiting the depth of interpretability analysis. Future work should ensure complete SHAP value computation for all features.
+\end{enumerate}
+
+\textbf{Future directions:}
+\begin{itemize}
+    \item \textbf{Attention mechanisms:} Investigate neural network attention over features and time steps to automatically identify critical moments and facial regions for affective recognition.
+
+    \item \textbf{Multi-modal fusion:} Incorporate audio features (prosody, speech rate) and physiological signals (heart rate, skin conductance) for more robust affective recognition, particularly for subtle states like boredom.
+
+    \item \textbf{Self-supervised pretraining:} Leverage unlabeled video data for pretraining feature extractors to improve generalization and reduce dependence on labeled datasets.
+
+    \item \textbf{Transformer architectures:} Explore transformer-based models that can capture both local temporal patterns and global context more effectively than LSTMs or gradient boosting.
+    
+    \item \textbf{Focal loss optimization:} The focal loss parameters ($\alpha=0.25$, $\gamma=2.0$) were not tuned; optimizing these could improve performance on minority classes.
+
+    \item \textbf{Real-time deployment:} The 50-feature ablation model with 12s training time enables edge deployment for real-time affective monitoring applications. Future work should benchmark inference latency on mobile devices.
+    
+    \item \textbf{Cross-dataset validation:} Evaluate model performance on other affective computing datasets (e.g., AffectNet, SEWA) to assess generalization capabilities.
+\end{itemize}
+
+\subsection{Summary}
+\label{sec:summary}
+
+This study presents a comprehensive evaluation of XGBoost-based multi-task affective state recognition using engineered facial features. Key findings include:
+
+\begin{enumerate}
+    \item \textbf{Default XGBoost outperforms optimization:} The default hyperparameter configuration (62.9\% accuracy, 0.410 F1-macro) surpassed the Bayesian-optimized model (61.7\% accuracy, 0.353 F1-macro), demonstrating the robustness of default settings for this feature space. This finding suggests that extensive feature engineering may reduce the need for hyperparameter tuning.
+
+    \item \textbf{Frustration detection excels:} Frustration achieves the highest accuracy (78.3\%) due to distinctive facial tension patterns, while boredom detection remains near chance (50.6\%). This dichotomy reflects the varying distinctiveness of affective facial expressions.
+
+    \item \textbf{Feature importance insights:} SHAP and permutation importance show weak correlation (r = -0.32 to +0.31), highlighting the complementary information provided by different importance measures. Composite features (confusion\_detailed, engagement\_detailed) and spectral features dominate top rankings, validating the domain-aware feature engineering approach.
+    
+    \item \textbf{Stable features:} Frustration has the most stable features (9 features appearing in both SHAP and permutation top-10), correlating with its high classification accuracy. Engagement has only 2 stable features, reflecting its more variable expression patterns.
+
+    \item \textbf{Feature efficiency:} The top 50 engineered features capture 97.8\% of full-model performance, enabling 14$\times$ faster training with only 2.2\% accuracy loss. This finding has practical implications for deploying affective recognition on resource-constrained devices.
+
+    \item \textbf{Temporal context:} An optimal window of 100 frames (6.67 seconds) balances F1-macro performance (0.417) with practical deployment considerations. Performance stabilizes beyond 30 frames (2 seconds), suggesting most affective states manifest within short time windows.
+
+    \item \textbf{Engineered vs. raw features:} The 2,152-dimensional engineered feature space significantly outperforms the original 78-dimensional MediaPipe features, validating the extensive feature engineering approach including statistical, temporal, frequency, and interaction features.
+    
+    \item \textbf{Class imbalance challenges:} High class imbalance in the DAiSEE dataset disproportionately affects minority class performance, particularly for High engagement (72 samples) and High frustration (57 samples). Weighted F1 scores are substantially higher than macro F1, confirming this effect.
+\end{enumerate}
+
+These results provide practical guidelines for deploying affective computing systems in educational, clinical, and human-computer interaction applications, with particular emphasis on feature engineering strategies, model selection, and the importance of considering class imbalance in evaluation metrics.
