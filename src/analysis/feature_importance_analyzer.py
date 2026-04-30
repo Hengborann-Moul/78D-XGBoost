@@ -66,17 +66,19 @@ class FeatureImportanceAnalyzer:
         "cheek": {"indices": [5, 6], "description": "Cheek movements"},
     }
 
-    # Feature names for original 78D
+    # Feature names for original 78D — must match the order emitted by
+    # src.mediapipe_feature_extractor.MediaPipeFeatureExtractor exactly.
     ORIGINAL_FEATURE_NAMES = [
         # Blendshapes (52 features) - indices 0-51
+        "_neutral",
         "browDownLeft",
         "browDownRight",
         "browInnerUp",
         "browOuterUpLeft",
         "browOuterUpRight",
+        "cheekPuff",
         "cheekSquintLeft",
         "cheekSquintRight",
-        "chinRaiserLower",
         "eyeBlinkLeft",
         "eyeBlinkRight",
         "eyeLookDownLeft",
@@ -93,8 +95,8 @@ class FeatureImportanceAnalyzer:
         "eyeWideRight",
         "jawForward",
         "jawLeft",
-        "jawRight",
         "jawOpen",
+        "jawRight",
         "mouthClose",
         "mouthDimpleLeft",
         "mouthDimpleRight",
@@ -102,7 +104,8 @@ class FeatureImportanceAnalyzer:
         "mouthFrownRight",
         "mouthFunnel",
         "mouthLeft",
-        "mouthLowerDown",
+        "mouthLowerDownLeft",
+        "mouthLowerDownRight",
         "mouthPressLeft",
         "mouthPressRight",
         "mouthPucker",
@@ -115,41 +118,40 @@ class FeatureImportanceAnalyzer:
         "mouthSmileRight",
         "mouthStretchLeft",
         "mouthStretchRight",
-        "mouthUpperUp",
+        "mouthUpperUpLeft",
+        "mouthUpperUpRight",
         "noseSneerLeft",
         "noseSneerRight",
-        "tongueOut",
-        "tongueTip",
         # Head pose (6 features) - indices 52-57
         "head_pitch",
         "head_yaw",
         "head_roll",
-        "head_tx",
-        "head_ty",
-        "head_tz",
+        "head_translation_x",
+        "head_translation_y",
+        "head_translation_z",
         # Eye gaze (6 features) - indices 58-63
-        "eye_gaze_left_x",
-        "eye_gaze_left_y",
-        "eye_gaze_right_x",
-        "eye_gaze_right_y",
-        "combined_gaze_x",
-        "combined_gaze_y",
+        "left_gaze_horizontal",
+        "left_gaze_vertical",
+        "right_gaze_horizontal",
+        "right_gaze_vertical",
+        "combined_gaze_horizontal",
+        "combined_gaze_vertical",
         # Composite features (10 features) - indices 64-73
-        "boredom_indicator",
-        "engagement_indicator",
+        "eyebrow_activity",
+        "eye_activity",
+        "mouth_activity",
+        "eyebrow_symmetry",
+        "eye_symmetry",
+        "mouth_symmetry",
         "confusion_indicator",
         "frustration_indicator",
-        "attention_score",
-        "arousal_level",
-        "valence_score",
-        "emotional_intensity",
-        "cognitive_load",
-        "gaze_stability",
+        "boredom_indicator",
+        "engagement_indicator",
         # Dynamics (4 features) - indices 74-77
-        "animation_level",
-        "intensity",
-        "active_regions",
-        "tension",
+        "facial_animation_level",
+        "expression_intensity",
+        "active_regions_count",
+        "facial_tension",
     ]
 
     def __init__(
@@ -241,28 +243,26 @@ class FeatureImportanceAnalyzer:
         models: Dict,
         X_train: np.ndarray,
         X_val: np.ndarray,
-        X_test: np.ndarray,
         sample_size: Optional[int] = 200,
-        background_size: int = 100,
         verbose: bool = True,
     ) -> Dict[str, np.ndarray]:
         """
         Stage 1: Compute SHAP values for each affective state model.
 
         Uses TreeSHAP for fast exact computation on XGBoost trees.
-        Focuses on original 78D features for interpretability.
 
         Args:
             models: Dict mapping state -> trained XGBoost model
-            X_train: Training data (for background distribution)
-            X_val: Validation data
-            X_test: Test data
+            X_train: Training data (only used for shape reference / background)
+            X_val: Validation data to explain
             sample_size: Number of samples to explain (None = all, or sample N)
-            background_size: Background dataset size for SHAP
             verbose: Print progress
 
         Returns:
-            shap_values: Dict mapping state -> SHAP values array
+            shap_values: Dict mapping state -> SHAP values dict with keys:
+                - "per_class": List of (N, features) arrays per class
+                - "mean_abs": (N, features) mean absolute SHAP values
+                - "X_explain": (N, features) feature values for coloring
         """
         if verbose:
             print("\n" + "=" * 80)
@@ -277,13 +277,6 @@ class FeatureImportanceAnalyzer:
 
             model = models[state]
 
-            # Sample background data for SHAP
-            n_bg = min(background_size, len(X_train))
-            background_idx = np.random.RandomState(self.random_state).choice(
-                len(X_train), size=n_bg, replace=False
-            )
-            background = X_train[background_idx]
-
             # Sample data to explain
             if sample_size is not None and len(X_val) > sample_size:
                 explain_idx = np.random.RandomState(
@@ -292,16 +285,6 @@ class FeatureImportanceAnalyzer:
                 X_explain = X_val[explain_idx]
             else:
                 X_explain = X_val
-
-            # Ensure X_train is 2D for background sampling
-            X_train_2d = X_train
-            if X_train.ndim == 3:
-                N, T, F = X_train.shape
-                X_train_2d = X_train.reshape(N, T * F)
-                if verbose:
-                    print(
-                        f"  Warning: Flattened X_train from {X_train.shape} to {X_train_2d.shape}"
-                    )
 
             # Ensure X_explain is 2D
             X_explain_2d = X_explain
@@ -313,74 +296,72 @@ class FeatureImportanceAnalyzer:
                         f"  Warning: Flattened X_explain from {X_explain.shape} to {X_explain_2d.shape}"
                     )
 
+            n_features = X_explain_2d.shape[1]
+
+            # Build feature names that cover *all* columns
+            feat_names = self.feature_names[:n_features]
+            if len(feat_names) < n_features:
+                feat_names = feat_names + [
+                    f"feat_{i}" for i in range(len(feat_names), n_features)
+                ]
+
             if verbose:
-                print(f"  Background samples: {n_bg}")
                 print(f"  Samples to explain: {len(X_explain_2d)}")
-                print(f"  X_explain shape: {X_explain_2d.shape}")
+                print(f"  Feature dimension: {n_features}")
 
             # Create TreeExplainer
             try:
-                # Use model_output="raw" (log-odds) as it's the most reliable mode
-                # Probability output requires interventional perturbation with background data
                 explainer = shap.TreeExplainer(
                     model,
                     data=None,
-                    feature_names=self.feature_names[: X_explain_2d.shape[1]],
+                    feature_names=feat_names,
                     model_output="raw",
                 )
 
                 # Compute SHAP values
                 shap_vals = explainer.shap_values(X_explain_2d, check_additivity=False)
 
-                # Validate SHAP values are not all zero
                 # XGBoost can return:
                 # - 2D array (N, features) for binary classification
                 # - 3D array (N, features, n_classes) for multi-class
                 # - List of 2D arrays for some versions
                 if isinstance(shap_vals, list):
-                    # List of (N, features) per class - stack to 3D
+                    # List of (N, features) per class
                     shap_vals_array = np.stack(
                         shap_vals, axis=-1
                     )  # (N, features, n_classes)
-                    shap_vals_mean = np.mean(
+                    mean_abs = np.mean(
                         np.abs(shap_vals_array), axis=-1
                     )  # (N, features)
                 elif shap_vals.ndim == 3:
-                    # 3D array (N, features, n_classes) - mean across classes
-                    shap_vals_mean = np.mean(
-                        np.abs(shap_vals), axis=-1
-                    )  # (N, features)
+                    shap_vals_array = shap_vals
+                    mean_abs = np.mean(np.abs(shap_vals), axis=-1)  # (N, features)
                 else:
-                    # 2D array (N, features) - binary classification
-                    shap_vals_mean = np.abs(shap_vals)
+                    shap_vals_array = shap_vals[..., np.newaxis]  # (N, features, 1)
+                    mean_abs = np.abs(shap_vals)  # (N, features)
 
                 # Ensure 2D shape (N, features)
-                if shap_vals_mean.ndim == 1:
-                    shap_vals_mean = shap_vals_mean.reshape(1, -1)
+                if mean_abs.ndim == 1:
+                    mean_abs = mean_abs.reshape(1, -1)
 
-                if shap_vals_mean.sum() == 0:
+                if mean_abs.sum() == 0:
                     print(f"  ⚠ Warning: SHAP values are all zero for {state}")
                     self.shap_values[state] = None
                 else:
-                    # Handle multi-class output (list of arrays per class)
-                    if isinstance(shap_vals, list):
-                        self.shap_values[state] = {
-                            "per_class": shap_vals,  # List of (N, features) per class
-                            "mean_abs": shap_vals_mean,  # (N, features)
-                            "X_explain": X_explain_2d,
-                        }
-                    else:
-                        # Binary classification
-                        self.shap_values[state] = {
-                            "per_class": [shap_vals],
-                            "mean_abs": shap_vals_mean,
-                            "X_explain": X_explain_2d,
-                        }
+                    self.shap_values[state] = {
+                        "per_class": (
+                            shap_vals
+                            if isinstance(shap_vals, list)
+                            else [shap_vals]
+                        ),  # List of (N, features) per class
+                        "mean_abs": mean_abs,  # (N, features)
+                        "X_explain": X_explain_2d,
+                    }
 
                     if verbose:
                         print(
-                            f"  ✓ SHAP values computed: shape {shap_vals_mean.shape}, "
-                            f"total_abs={shap_vals_mean.sum():.6f}"
+                            f"  ✓ SHAP values computed: shape {mean_abs.shape}, "
+                            f"total_abs={mean_abs.sum():.6f}"
                         )
 
             except Exception as e:
@@ -647,15 +628,23 @@ class FeatureImportanceAnalyzer:
                 suffixes=("_shap", "_perm"),
             )
 
-            # Spearman correlation of rankings
-            spearman_corr, spearman_p = spearmanr(
-                merged["rank_shap"], merged["rank_perm"]
-            )
+            if len(merged) < 2:
+                if verbose:
+                    print(
+                        f"  Warning: Only {len(merged)} common feature(s) between "
+                        f"SHAP and permutation top-{top_k}. Correlation undefined."
+                    )
+                spearman_corr = spearman_p = pearson_corr = pearson_p = float("nan")
+            else:
+                # Spearman correlation of rankings
+                spearman_corr, spearman_p = spearmanr(
+                    merged["rank_shap"], merged["rank_perm"]
+                )
 
-            # Pearson correlation of importance scores
-            pearson_corr, pearson_p = pearsonr(
-                merged["importance"], merged["importance_mean"]
-            )
+                # Pearson correlation of importance scores
+                pearson_corr, pearson_p = pearsonr(
+                    merged["importance"], merged["importance_mean"]
+                )
 
             # Jaccard similarity of top-k features
             shap_top_k = set(shap_df["feature_name"].head(top_k))

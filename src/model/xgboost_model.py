@@ -117,7 +117,7 @@ class EngagementXGBoost:
         # GPU settings
         if use_gpu:
             self.default_params["tree_method"] = "hist"
-            self.default_params["predictor"] = "gpu_predictor"
+            self.default_params["device"] = "cuda"
 
         # Initialize models for each affective state
         self.models = {state: None for state in self.AFFECTIVE_STATES}
@@ -193,8 +193,8 @@ class EngagementXGBoost:
             # Hessian (approximation)
             hess = np.abs(alpha * focal_weight * probs * (1.0 - probs)) + 1e-6
 
-            # Return with shape (n_samples, n_classes) as required by XGBoost 2.1.0+
-            return grad.astype(np.float32), hess.astype(np.float32)
+            # Flatten to 1D arrays as required by XGBoost 2.x sklearn API
+            return grad.astype(np.float32).flatten(), hess.astype(np.float32).flatten()
 
         return focal_loss_objective
 
@@ -369,7 +369,7 @@ class EngagementXGBoost:
                     )
 
                 X_train_state, y_train_state = self._apply_smote(
-                    X, y_train, random_state=params.get("random_state", 42)
+                    X_train_state, y_train, random_state=params.get("random_state", 42)
                 )
 
                 if verbose:
@@ -608,7 +608,8 @@ class EngagementXGBoost:
 
         For multi-class, apply softmax-like decision:
         - If max probability > threshold, predict that class
-        - Otherwise, predict argmax (default behavior)
+        - Otherwise, predict the middle class (conservative default for
+          low-confidence predictions)
 
         Args:
             probs: Predicted probabilities
@@ -617,14 +618,16 @@ class EngagementXGBoost:
         Returns:
             predictions: Predicted class labels
         """
+        n_classes = probs.shape[1]
+        default_class = n_classes // 2  # conservative middle class
         predictions = []
         for prob in probs:
             max_prob = np.max(prob)
             if max_prob > threshold:
                 predictions.append(np.argmax(prob))
             else:
-                # If confidence is low, still take argmax
-                predictions.append(np.argmax(prob))
+                # Low confidence: fall back to conservative middle class
+                predictions.append(default_class)
 
         return np.array(predictions)
 
@@ -642,6 +645,9 @@ class EngagementXGBoost:
             raise RuntimeError(
                 "Model must be fitted before prediction. Call fit() first."
             )
+
+        # Handle NaN values in test data
+        X = np.nan_to_num(X, nan=0.0)
 
         predictions = {}
         for state in self.AFFECTIVE_STATES:

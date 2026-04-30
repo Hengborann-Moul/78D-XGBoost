@@ -278,6 +278,39 @@ def normalize_data(X_train, X_val, X_test, cfg, run_dir, feature_names):
     return X_train, X_val, X_test, normalizer
 
 
+def create_calibration_split(X_train, y_train, calibration_ratio=0.15, random_state=42):
+    """
+    Split training data into a smaller training set and a calibration set.
+
+    Uses stratified sampling based on engagement labels to preserve class
+    distribution.
+
+    Returns:
+        X_train, y_train, X_calib, y_calib
+    """
+    if calibration_ratio <= 0 or calibration_ratio >= 1:
+        return X_train, y_train, None, None
+
+    idx = np.arange(len(X_train))
+    idx_train, idx_calib = train_test_split(
+        idx,
+        test_size=calibration_ratio,
+        random_state=random_state,
+        stratify=y_train["engagement"],
+    )
+
+    X_calib = X_train[idx_calib]
+    y_calib = {s: y_train[s][idx_calib] for s in AFFECTIVE_STATES}
+    X_train_new = X_train[idx_train]
+    y_train_new = {s: y_train[s][idx_train] for s in AFFECTIVE_STATES}
+
+    print(
+        f"Calibration split: train={len(X_train_new)}  calib={len(X_calib)} "
+        f"(ratio={calibration_ratio:.2f})"
+    )
+    return X_train_new, y_train_new, X_calib, y_calib
+
+
 # ---------------------------------------------------------------------------
 # PyTorch Dataset
 # ---------------------------------------------------------------------------
@@ -802,6 +835,15 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
     # Calibration
     calibrate_probabilities = calib_cfg.get("enabled", True)
     calibration_method = calib_cfg.get("method", "isotonic")
+    use_calibration_set = calib_cfg.get("use_calibration_set", True)
+    calibration_ratio = calib_cfg.get("calibration_ratio", 0.15)
+
+    # Create calibration split if needed
+    X_calib, y_calib = None, None
+    if calibrate_probabilities and use_calibration_set:
+        X_train_final, y_train, X_calib, y_calib = create_calibration_split(
+            X_train_final, y_train, calibration_ratio=calibration_ratio, random_state=42
+        )
 
     # Focal Loss
     use_focal_loss = focal_cfg.get("enabled", False)
@@ -831,6 +873,8 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
     if use_focal_loss:
         print(f"    alpha={focal_alpha}, gamma={focal_gamma}")
     print(f"  Calibration: {calibrate_probabilities}")
+    if calibrate_probabilities and X_calib is not None:
+        print(f"    Calibration set: {len(X_calib)} samples")
     print(f"  Threshold optimization: {optimize_thresholds}")
 
     xgb_model.fit(
@@ -838,6 +882,8 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
         y_train,
         X_val_final,
         y_val,
+        X_calib=X_calib,
+        y_calib=y_calib,
         feature_names=None,
         verbose=True,
     )
@@ -1105,6 +1151,15 @@ def train_ensemble(
     # Calibration
     calibrate_probabilities = calib_cfg.get("enabled", True)
     calibration_method = calib_cfg.get("method", "isotonic")
+    use_calibration_set = calib_cfg.get("use_calibration_set", True)
+    calibration_ratio = calib_cfg.get("calibration_ratio", 0.15)
+
+    # Create calibration split if needed
+    X_calib, y_calib = None, None
+    if calibrate_probabilities and use_calibration_set:
+        X_train_final, y_train, X_calib, y_calib = create_calibration_split(
+            X_train_final, y_train, calibration_ratio=calibration_ratio, random_state=42
+        )
 
     # Focal Loss
     use_focal_loss = focal_cfg.get("enabled", False)
@@ -1134,6 +1189,8 @@ def train_ensemble(
     if use_focal_loss:
         print(f"    alpha={focal_alpha}, gamma={focal_gamma}")
     print(f"  Calibration: {calibrate_probabilities}")
+    if calibrate_probabilities and X_calib is not None:
+        print(f"    Calibration set: {len(X_calib)} samples")
     print(f"  Threshold optimization: {optimize_thresholds}")
     print(f"  Feature selection: {use_feature_selection}")
 
@@ -1142,6 +1199,8 @@ def train_ensemble(
         y_train,
         X_val_final,
         y_val,
+        X_calib=X_calib,
+        y_calib=y_calib,
         feature_names=None,
         verbose=True,
     )

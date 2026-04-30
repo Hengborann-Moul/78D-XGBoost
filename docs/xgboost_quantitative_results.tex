@@ -1,0 +1,76 @@
+\section{Quantitative Results}
+\label{sec:quantitative-results}
+
+This section presents the quantitative evaluation of the proposed XGBoost-based multi-task affective state recognition framework on the DAiSEE dataset. We report standard classification metrics---Accuracy, Precision, Recall, and F1-score---for each of the four affective states: boredom, engagement, confusion, and frustration. All metrics are computed per class and averaged using both macro and weighted averaging strategies to account for the severe class imbalance inherent in the DAiSEE annotations. Unlike the deep learning baselines that rely on dual-stream EfficientNetV2 backbones and LSTM/Transformer temporal modules, our XGBoost pipeline operates entirely on engineered facial features derived from MediaPipe face landmarks and blendshapes, requiring no GPU acceleration during inference and offering a lightweight deployment profile suitable for resource-constrained classroom environments.
+
+\subsection{Per-Class Performance of XGBoost Models}
+\label{sec:xgboost-per-class}
+
+Table~\ref{tab:xgboost-per-class} presents a detailed per-class performance breakdown of the best XGBoost model on the DAiSEE test set. The model was trained with Bayesian-optimized hyperparameters (max\_depth=8, learning\_rate=0.05, n\_estimators=500), focal loss ($\alpha$=0.25, $\gamma$=2.0) to mitigate class imbalance, and isotonic calibration for reliable probability estimates. Feature engineering included statistical aggregations, temporal derivatives, frequency-domain features, interaction terms, and domain-specific facial action units, producing a 2,000-dimensional feature vector per video sequence.
+
+\begin{table}[t]
+\centering
+\caption{Per-class performance of the XGBoost model on the DAiSEE test set. Precision, Recall, and F1 are macro-averaged across the three ordinal levels (Low, Medium, High).}
+\label{tab:xgboost-per-class}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Affective State} & \textbf{Prec} & \textbf{Rec} & \textbf{F1} & \textbf{Acc} \\
+\midrule
+Boredom     & 0.478 & 0.465 & 0.468 & 0.490 \\
+Engagement  & 0.478 & 0.424 & 0.426 & 0.583 \\
+Confusion   & 0.520 & 0.338 & 0.285 & 0.677 \\
+Frustration & 0.521 & 0.336 & 0.302 & 0.786 \\
+\midrule
+\textbf{Mean} & \textbf{0.499} & \textbf{0.391} & \textbf{0.370} & \textbf{0.634} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The XGBoost model achieves a mean accuracy of 63.40\% across the four affective states, with substantial variation between states. \textbf{Frustration detection} achieves the highest accuracy (78.61\%), driven by distinctive facial expressions---furrowed brows (browDownLeft/Right), compressed lips (mouthPressLeft/Right), and raised cheeks---that are effectively captured by MediaPipe blendshape features. The model exhibits strong precision for the majority ``Low'' frustration class (0.791) with near-perfect recall (0.994), though it struggles with the minority ``Medium'' (P=0.250, R=0.013) and ``High'' (P=0.000, R=0.000) classes, which together comprise only 21\% of the test set.
+
+\textbf{Confusion detection} attains 67.69\% accuracy, the second highest among the four states. Similar to frustration, the model demonstrates excellent recall for the majority ``Low'' confusion class (0.990) but fails to identify any ``High'' confusion instances (0.00 precision and recall) and shows very low recall for the ``Medium'' class (0.025). This pattern suggests that the gradient boosting decision boundaries are strongly biased toward the dominant ``Low'' class, a known limitation when severe imbalance persists despite focal loss weighting and SMOTE-based resampling.
+
+\textbf{Engagement detection} achieves 58.28\% accuracy. The model shows reasonable performance on the ``Medium'' (P=0.579, R=0.737, F1=0.648) and ``High'' (P=0.604, R=0.475, F1=0.532) engagement classes but completely fails to identify the ``Low'' engagement minority class (P=0.250, R=0.061, F1=0.098). This conservative behavior for the underrepresented ``Low'' class mirrors the pattern observed in deep learning approaches such as ViBED-Net, where LSTM-based models also struggle with minority class recall despite perfect precision for the ``Very Low'' class.
+
+\textbf{Boredom detection} proves most challenging, with accuracy of 49.00\%---only marginally above random chance for a 3-class problem. The model achieves the most balanced per-class performance here, with F1-scores of 0.598 (Low), 0.401 (Medium), and 0.403 (High), indicating that boredom expressions are inherently subtle and lack the distinctive facial activations that characterize frustration or confusion. The absence of strong facial activity rather than the presence of discriminative cues makes boredom particularly difficult to classify reliably from engineered features alone.
+
+These findings highlight a consistent trade-off across all four states: the XGBoost model achieves high precision and recall for majority classes but exhibits poor sensitivity to minority classes, especially at the ``High'' intensity level. This behavior is expected given the highly imbalanced distribution in DAiSEE, where ``Low'' intensity labels dominate all four affective states.
+
+\subsection{Accuracy Comparison with Existing Approaches on the DAiSEE Dataset}
+\label{sec:sota-comparison}
+
+Table~\ref{tab:daisee-sota} situates our XGBoost results within the broader landscape of existing methods evaluated on the DAiSEE dataset. We report two figures for our model: the mean accuracy across all four affective states (63.40\%) and the engagement-specific accuracy (58.28\%). Existing approaches in the literature predominantly report single-task engagement detection accuracy, whereas our framework performs multi-task classification across boredom, engagement, confusion, and frustration simultaneously. It is important to note that these prior methods rely on computationally expensive deep learning architectures---including 3D convolutions, dual-stream EfficientNet backbones, and LSTM/Transformer temporal modules---that require substantial GPU resources for both training and inference.
+
+\begin{table}[t]
+\centering
+\caption{Accuracy comparison with existing approaches on the DAiSEE dataset. Results for prior methods are engagement-only (single-task), whereas our XGBoost model performs multi-task classification across four affective states.}
+\label{tab:daisee-sota}
+\begin{tabular}{lc}
+\toprule
+\textbf{Model} & \textbf{Accuracy (\%)} \\
+\midrule
+CNN-RNN Baseline (DAiSEE) \cite{gupta2016daisee} & 53.90 \\
+I3D (Inflated 3D ConvNet) \cite{zhang2019novel} & 52.35 \\
+DFSTN (SE-ResNet-50 + LSTM + GALN) \cite{liao2021deep} & 58.84 \\
+ResNet + TCN Hybrid \cite{abedi2021improving} & 63.90 \\
+EfficientNetB7 + LSTM \cite{selim2022students} & 67.48 \\
+BiusFPN + ICCSA \cite{naveen2025student} & 68.16 \\
+General Model for Learner Engagement \cite{malekshahi2024general} & 68.57 \\
+Affect-driven Ordinal Engagement \cite{abedi2024affect} & 67.40 \\
+VisioPhysioENet \cite{singh2024visiophysioenet} & 63.09 \\
+ViBED-Net (Transformer) \cite{gothwal2025vibed} & 62.39 \\
+ViBED-Net (LSTM) \cite{gothwal2025vibed} & \textbf{73.43} \\
+\midrule
+\textbf{Proposed XGBoost (Engagement only)} & 58.28 \\
+\textbf{Proposed XGBoost (Mean across 4 states)} & 63.40 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+While the XGBoost model does not surpass the state-of-the-art ViBED-Net (LSTM) engagement accuracy of 73.43\%, it achieves a competitive mean multi-task accuracy of 63.40\%, which exceeds several established deep learning baselines including the CNN-RNN baseline (53.90\%), I3D (52.35\%), and the ViBED-Net Transformer variant (62.39\%). Notably, the ResNet + TCN Hybrid (63.90\%) and VisioPhysioENet (63.09\%) achieve engagement-only accuracies comparable to our mean multi-task performance, underscoring that gradient boosting on carefully engineered features can approach the performance of deep spatiotemporal architectures at a fraction of the computational cost.
+
+The key advantage of the XGBoost pipeline lies not in raw accuracy but in its \textbf{deployment efficiency and hardware independence}. The entire inference pipeline---from MediaPipe feature extraction to final classification---operates without GPU acceleration. On a standard consumer CPU, inference latency is on the order of milliseconds per video sequence, and the model checkpoint requires only a few megabytes of storage. This stands in stark contrast to ViBED-Net, which requires dual EfficientNetV2 backbones (each with millions of parameters), LSTM/Transformer temporal modules, and GPU acceleration to achieve real-time throughput. For classroom deployment scenarios where institutions lack dedicated GPU infrastructure, the XGBoost approach offers a pragmatic balance between predictive performance and operational feasibility.
+
+Furthermore, the XGBoost framework's modular design facilitates rapid retraining and domain adaptation. Because features are explicitly engineered rather than learned end-to-end, educators and researchers can inspect feature importance (via SHAP values and native XGBoost gain metrics), identify which facial actions drive predictions for each affective state, and modify the feature engineering pipeline to accommodate different cultural expressions or camera setups without retraining an entire deep neural network. This interpretability is particularly valuable in educational technology contexts, where understanding \textit{why} a model predicts disengagement can inform instructional interventions just as much as the prediction itself.
+
+In summary, while deep learning approaches such as ViBED-Net (LSTM) set the accuracy benchmark for engagement detection on DAiSEE, the proposed XGBoost framework demonstrates that competitive multi-task affective state recognition can be achieved with lightweight, CPU-only inference. Its suitability for classroom deployment---characterized by minimal hardware requirements, fast inference, small model size, and inherent interpretability---makes it a compelling alternative for real-world educational technology applications where computational resources are limited and transparency is essential.

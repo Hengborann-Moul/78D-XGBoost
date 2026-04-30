@@ -97,7 +97,7 @@ xgboost:
   # Class Imbalance Handling
   imbalance_handling:
     enabled: true
-    strategy: "smote"
+    strategy: "auto"
     smote_k_neighbors: 5
     smote_random_state: 42
 

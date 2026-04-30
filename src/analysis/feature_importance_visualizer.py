@@ -70,30 +70,58 @@ class FeatureImportanceVisualizer:
             "unknown": "#95a5a6",
         }
 
-        # Get mean absolute SHAP values
-        mean_abs_shap = shap_values[state]["mean_abs"]
-        X_explain = shap_values[state]["X_explain"]
+        # Retrieve stored data
+        per_class = shap_values[state]["per_class"]  # List of (N, features) or (N, features, n_classes)
+        mean_abs_shap = shap_values[state]["mean_abs"]  # (N, features)
+        X_explain = shap_values[state]["X_explain"]  # (N, features)
+
+        # Build raw SHAP matrix for beeswarm: collapse any class dimension
+        raw_shap_list = []
+        for arr in per_class:
+            if arr.ndim == 3:
+                # Multi-class: sum across classes to preserve overall directional impact
+                raw_shap_list.append(arr.sum(axis=-1))
+            else:
+                raw_shap_list.append(arr)
+        raw_shap = np.stack(raw_shap_list, axis=-1).sum(axis=-1)  # (N, features)
+
+        # Calculate feature importance for ranking
+        importance = np.mean(mean_abs_shap, axis=0)
+        top_indices = np.argsort(importance)[-top_k:][::-1]
 
         # Create figure with 2 subplots
         fig, axes = plt.subplots(1, 2, figsize=(16, 10))
 
-        # Plot 1: Beeswarm plot
+        # Plot 1: Beeswarm plot (directional SHAP values, colored by feature value)
         ax1 = axes[0]
-        shap_vals = mean_abs_shap  # (N, features)
 
-        # Calculate feature importance
-        importance = np.mean(np.abs(shap_vals), axis=0)
-        top_indices = np.argsort(importance)[-top_k:][::-1]
-
-        # Beeswarm-style plot
-        colors = plt.cm.viridis(np.linspace(0, 1, top_k))
         for i, idx in enumerate(top_indices):
-            values = shap_vals[:, idx]
+            shap_vals_feat = raw_shap[:, idx]
+            feat_values = X_explain[:, idx]
             y_pos = top_k - i - 1
 
-            # Add jitter for visibility
-            jitter = np.random.randn(len(values)) * 0.1
-            ax1.scatter(values, y_pos + jitter, alpha=0.4, s=20, c=[colors[i]])
+            # Color by feature value: low (blue) -> high (red)
+            # Normalize feature values to [0, 1] for this feature across samples
+            feat_min, feat_max = feat_values.min(), feat_values.max()
+            if feat_max - feat_min > 1e-8:
+                norm_vals = (feat_values - feat_min) / (feat_max - feat_min)
+            else:
+                norm_vals = np.ones_like(feat_values) * 0.5
+
+            # Sort by normalized value so darker colors are on top
+            sort_order = np.argsort(norm_vals)
+
+            ax1.scatter(
+                shap_vals_feat[sort_order],
+                y_pos + np.random.randn(len(shap_vals_feat)) * 0.15,
+                c=norm_vals[sort_order],
+                cmap="coolwarm_r",
+                alpha=0.6,
+                s=25,
+                edgecolors="none",
+                vmin=0,
+                vmax=1,
+            )
 
         # Set labels
         ax1.set_yticks(range(top_k))
@@ -104,7 +132,7 @@ class FeatureImportanceVisualizer:
         ax1.set_yticklabels(feature_labels, fontsize=9)
         ax1.set_xlabel("SHAP value (impact on model output)", fontsize=11)
         ax1.set_title(
-            f"{state.upper()} - SHAP Feature Importance\n(Beeswarm Plot)",
+            f"{state.upper()} - SHAP Feature Importance\n(Beeswarm: red=high feature value)",
             fontsize=12,
             fontweight="bold",
         )

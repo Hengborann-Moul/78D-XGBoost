@@ -6,6 +6,7 @@ Author: Hengborann MOUL
 Date: 2026-04-07
 """
 
+import json
 import sys
 import warnings
 from pathlib import Path
@@ -74,9 +75,28 @@ def run_feature_importance_analysis(
         print(f"Feature dimension: {X_train.shape[1]}")
         print(f"Output directory: {output_dir}")
 
+    # Resolve meaningful feature names for the analyzer / plots
+    if feature_engineer is not None:
+        try:
+            engineered_feature_names = feature_engineer.get_engineered_feature_names()
+            if selected_indices is not None:
+                engineered_feature_names = [
+                    engineered_feature_names[i] for i in selected_indices
+                ]
+            if verbose:
+                print(
+                    f"  Using {len(engineered_feature_names)} meaningful engineered feature names"
+                )
+        except Exception as e:
+            if verbose:
+                print(f"  Warning: Could not get engineered feature names: {e}")
+            engineered_feature_names = feature_names[: X_train.shape[1]]
+    else:
+        engineered_feature_names = feature_names[: X_train.shape[1]]
+
     # Initialize analyzer
     analyzer = FeatureImportanceAnalyzer(
-        feature_names=feature_names[: X_train.shape[1]],  # Match feature dimension
+        feature_names=engineered_feature_names,
         output_dir=output_dir,
         random_state=config.get("data", {}).get("random_seed", 42),
     )
@@ -120,16 +140,13 @@ def run_feature_importance_analysis(
 
     if verbose:
         print(f"\n[Stage 1/2] Computing SHAP values...")
-        print(f"  Background samples: {background_size}")
         print(f"  Sample size: {sample_size}")
 
     shap_values = analyzer.compute_shap_values(
         models=models,
         X_train=X_train,
         X_val=X_val,
-        X_test=X_test,
         sample_size=sample_size,
-        background_size=background_size,
         verbose=verbose,
     )
 
@@ -228,8 +245,6 @@ def run_feature_importance_analysis(
         if verbose:
             print("\n[Generating Visualizations]")
 
-        feature_names_trimmed = feature_names[: X_train.shape[1]]
-
         # Compute feature group assignments for visualizations
         feature_groups_list = analyzer.get_feature_groups_list(X_train.shape[1])
 
@@ -240,7 +255,7 @@ def run_feature_importance_analysis(
             # SHAP summary plot (uses feature_groups for coloring)
             visualizer.plot_shap_summary(
                 shap_values=shap_values,
-                feature_names=feature_names_trimmed,
+                feature_names=engineered_feature_names,
                 state=state,
                 top_k=30,
                 save=True,
@@ -250,7 +265,7 @@ def run_feature_importance_analysis(
             # Permutation importance plot
             visualizer.plot_permutation_importance(
                 perm_importance=perm_dfs,
-                feature_names=feature_names_trimmed,
+                feature_names=engineered_feature_names,
                 state=state,
                 top_k=30,
                 save=True,
@@ -278,6 +293,35 @@ def run_feature_importance_analysis(
             shap_importance=shap_dfs, top_k=20, save=True
         )
 
+    # Save original-feature summary JSON (human-readable)
+    if original_feature_importance:
+        orig_summary = {}
+        for state, df in original_feature_importance.items():
+            orig_summary[state] = {
+                "top_10": df.head(10).to_dict(orient="records"),
+                "top_groups": (
+                    df.head(50)
+                    .assign(
+                        group=df.head(50)["feature"].apply(
+                            lambda f: analyzer._get_original_feature_group(
+                                analyzer.ORIGINAL_FEATURE_NAMES.index(f)
+                                if f in analyzer.ORIGINAL_FEATURE_NAMES
+                                else -1
+                            )
+                        )
+                    )
+                    .groupby("group")["importance"]
+                    .sum()
+                    .sort_values(ascending=False)
+                    .to_dict()
+                ),
+            }
+        orig_summary_path = Path(output_dir) / "original_feature_summary.json"
+        with open(orig_summary_path, "w") as f:
+            json.dump(orig_summary, f, indent=2)
+        if verbose:
+            print(f"  ✓ Original feature summary saved to {orig_summary_path}")
+
     # Save results
     if fi_config.get("generate_report", True):
         analyzer.save_results(verbose=verbose)
@@ -293,6 +337,7 @@ def run_feature_importance_analysis(
         "shap_importance": shap_dfs,
         "perm_importance": perm_dfs,
         "validation_report": validation_report,
+        "original_feature_importance": original_feature_importance,
     }
 
 
