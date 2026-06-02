@@ -13,14 +13,13 @@ Author: Hengborann MOUL
 Date: 2026-03-03
 """
 
-import warnings
-from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 from scipy import signal, stats
 from scipy.fft import fft, fftfreq
-from sklearn.decomposition import PCA
 
 
 def _clean_features(features: np.ndarray) -> np.ndarray:
@@ -788,19 +787,44 @@ class FeatureEngineer:
 
 # Convenience functions
 def engineer_dataset_features(
-    sequences: np.ndarray, feature_names: List[str], verbose: bool = True
+    sequences: np.ndarray,
+    feature_names: List[str],
+    verbose: bool = True,
+    cache_path: Optional[str] = None,
 ) -> np.ndarray:
     """
     Engineer features for entire dataset.
+
+    Supports disk-based caching: if cache_path is provided and the file exists,
+    features are loaded directly from cache. Otherwise, features are computed
+    and saved to cache_path for future reuse.
 
     Args:
         sequences: (num_videos, num_frames, 78) array
         feature_names: List of 78 base feature names
         verbose: Show progress
+        cache_path: Optional path to save/load engineered features (.npy).
 
     Returns:
         engineered: (num_videos, engineered_dim) array
     """
+    # Try loading from cache
+    if cache_path is not None:
+        cache_file = Path(cache_path)
+        if cache_file.exists():
+            if verbose:
+                print(f"Loading cached features from {cache_file}")
+            result = np.load(cache_file)
+            # Validate shape matches input
+            if result.shape[0] == sequences.shape[0]:
+                return result
+            else:
+                if verbose:
+                    print(
+                        f"Cache shape mismatch (cached {result.shape[0]} vs "
+                        f"current {sequences.shape[0]}). Recomputing..."
+                    )
+
     engineer = FeatureEngineer(feature_names)
 
     num_videos = sequences.shape[0]
@@ -820,6 +844,15 @@ def engineer_dataset_features(
     # Final cleaning to ensure no NaN/Inf values in the entire dataset
     result = np.array(engineered_features)
     result = _clean_features(result)
+
+    # Save to cache
+    if cache_path is not None:
+        cache_file = Path(cache_path)
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        np.save(cache_file, result)
+        if verbose:
+            mb = result.nbytes / (1024 * 1024)
+            print(f"Features cached to {cache_file} ({mb:.1f} MB)")
 
     return result
 

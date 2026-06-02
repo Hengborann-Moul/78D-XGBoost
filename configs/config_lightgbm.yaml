@@ -1,0 +1,154 @@
+# ============================================================
+# LightGBM Model Training Configuration
+# Affective State Recognition (Boredom, Engagement, Confusion, Frustration)
+# ============================================================
+
+# --- Data ---
+data:
+  features_path: "daisee_features_v2/X_features.npy"
+  labels:
+    boredom:     "daisee_features_v2/y_boredom.npy"
+    engagement:  "daisee_features_v2/y_engagement.npy"
+    confusion:   "daisee_features_v2/y_confusion.npy"
+    frustration: "daisee_features_v2/y_frustration.npy"
+  dataset_pkl: "daisee_features_v2/complete_dataset.pkl"
+  sequence_length: 150
+  num_features: 78
+  train_ratio: 0.80
+  val_ratio:   0.10
+  test_ratio:  0.10
+  random_seed: 42
+  stratify_state: "engagement"
+
+# --- Normalization ---
+normalization:
+  enabled: true
+  strategy: "mixed"   # options: standard | minmax | robust | mixed | none
+
+# --- Feature Engineering ---
+feature_engineering:
+  enabled: true
+  include_statistical:  true
+  include_temporal:     true
+  include_frequency:    true
+  include_interaction:  true
+  include_domain:       true
+
+# --- Feature Selection ---
+feature_selection:
+  enabled: true
+  k_features: 500
+  aggregation: "mean_rank"  # options: mean_rank | mean_score | max_score | sum_score
+  use_multitask_lasso: false
+  combine_methods: false
+  lasso_alpha: null
+
+# --- Class Imbalance Handling ---
+imbalance_handling:
+  enabled: false
+  strategy: "auto"
+  smote_k_neighbors: 5
+  smote_random_state: 42
+  use_scale_pos_weight: true
+  cost_sensitive:
+    enabled: true
+    distant_class_penalty: 3.0
+
+# --- Threshold Optimization ---
+threshold_optimization:
+  enabled: true
+  metric: "f1_macro"
+  search_range_min: 0.1
+  search_range_max: 0.9
+  search_steps: 40
+  per_class_optimization: true
+  ordinal_aware: true
+
+# --- Probability Calibration ---
+calibration:
+  enabled: true
+  method: "sigmoid"
+  use_calibration_set: false
+  calibration_ratio: 0.15
+
+# --- Model ---
+model:
+  name: "lightgbm"
+  num_classes: 3
+  use_gpu: false
+
+# --- LightGBM Hyperparameters ---
+lightgbm:
+  objective: "multiclass"
+  max_depth: 8
+  learning_rate: 0.05
+  n_estimators: 500
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_child_weight: 3
+  reg_alpha: 0.1
+  reg_lambda: 1.0
+  random_state: 42
+  n_jobs: -1
+  verbosity: -1
+  early_stopping_rounds: 50
+
+# --- Two-Stage Classification (for extreme imbalance) ---
+two_stage:
+  enabled: true
+  stage1_binary: true
+  stage1_objective: "binary"
+  stage2_objective: "binary"
+  stage1_max_depth: 6
+  stage1_n_estimators: 300
+  stage2_max_depth: 6
+  stage2_n_estimators: 300
+
+# --- Focal Loss (for class imbalance) ---
+focal_loss:
+  enabled: false
+  alpha: 0.25
+  gamma: 2.0
+
+# --- Evaluation ---
+evaluation:
+  states:
+    - boredom
+    - engagement
+    - confusion
+    - frustration
+  feature_importance_top_k: 20
+  feature_importance_type: "gain"
+  per_class_metrics: true
+  class_names: ["Low", "Medium", "High"]
+  report_class_distribution: true
+
+# --- Feature Importance Analysis (Two-Stage) ---
+feature_importance:
+  enabled: true
+
+  shap:
+    background_samples: 100
+    sample_size: 200
+    max_display_features: 30
+    compute_interactions: false
+
+  permutation:
+    n_repeats: 10
+    scoring: "f1_macro"
+    n_jobs: -1
+
+  top_k: 50
+  compare_states: true
+  identify_stable: true
+
+  output_subdir: "feature_importance"
+  save_shap_values: true
+  generate_report: true
+  generate_plots: true
+
+# --- Output ---
+output:
+  base_dir: "outputs_v2"
+  checkpoint_filename: "final_model.pt"
+  tensorboard: false

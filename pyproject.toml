@@ -9,6 +9,7 @@ dependencies = [
     "graphviz>=0.21",
     "imbalanced-learn>=0.14.1",
     "ipykernel>=7.2.0",
+    "lightgbm>=4.0.0",
     "lime>=0.2.0.1",
     "matplotlib>=3.10.8",
     "mediapipe>=0.10.32",

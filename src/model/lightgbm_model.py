@@ -1,5 +1,5 @@
 """
-XGBoost Model for Affective State Recognition
+LightGBM Model for Affective State Recognition
 Uses engineered features for multi-task classification.
 
 Features:
@@ -12,14 +12,13 @@ Features:
 - Works with engineered features (~2000D)
 
 Author: Hengborann MOUL
-Date: 2026-03-05
-Updated: 2026-03-18 (Added SMOTE, calibration, threshold optimization)
+Date: 2026-06-02
 """
 
 import math
 import os
 import numpy as np
-import xgboost as xgb
+import lightgbm as lgb
 from typing import Any, Dict, List, Tuple, Optional
 from sklearn.metrics import accuracy_score, f1_score, classification_report, precision_score, recall_score
 from sklearn.model_selection import RandomizedSearchCV
@@ -30,22 +29,22 @@ import yaml
 from pathlib import Path
 
 
-class EngagementXGBoost:
+class EngagementLightGBM:
     """
-    XGBoost model for affective state recognition.
+    LightGBM model for affective state recognition.
 
     Multi-task learning approach:
-    - Trains separate XGBoost classifier for each affective state
+    - Trains separate LightGBM classifier for each affective state
     - Uses engineered features (~2000D)
     - Handles class imbalance with SMOTE and sample weights
     - Supports threshold optimization and probability calibration
-    
-    NEW: Two-stage classification for extreme imbalance:
+
+    Two-stage classification for extreme imbalance:
     - Stage 1: Binary "Low vs Not-Low"
     - Stage 2: For "Not-Low", classify "Medium vs High"
-    
-    NEW: Per-class threshold optimization
-    NEW: Cost-sensitive learning with ordinal penalty matrix
+
+    Per-class threshold optimization
+    Cost-sensitive learning with ordinal penalty matrix
     """
 
     AFFECTIVE_STATES = ["boredom", "engagement", "confusion", "frustration"]
@@ -72,33 +71,8 @@ class EngagementXGBoost:
         cost_sensitive_enabled: bool = True,
         distant_class_penalty: float = 3.0,
         state_strategies: Optional[Dict[str, str]] = None,
-        **xgb_params,
+        **lgb_params,
     ):
-        """
-        Initialize XGBoost model.
-
-        Args:
-            num_classes: Number of classes per task (3 levels: Low/Medium/High)
-            use_gpu: Use GPU acceleration if available
-            early_stopping_rounds: Early stopping patience
-            use_smote: Apply SMOTE oversampling for minority classes (DEPRECATED: use scale_pos_weight instead)
-            smote_strategy: SMOTE sampling strategy ('auto', 'not minority', dict)
-            smote_k_neighbors: Number of neighbors for SMOTE
-            calibrate_probabilities: Apply probability calibration
-            calibration_method: 'isotonic' or 'sigmoid' (sigmoid recommended for imbalanced data)
-            optimize_thresholds: Optimize classification thresholds
-            threshold_metric: Metric to optimize ('f1_macro', 'f1_weighted')
-            per_class_thresholds: Optimize a separate threshold for each class
-            ordinal_aware: Respect ordinal nature of classes (Low < Medium < High)
-            use_focal_loss: Use focal loss objective (DEPRECATED: use scale_pos_weight instead)
-            focal_alpha: Focal loss alpha parameter (weighting factor, default 0.25)
-            focal_gamma: Focal loss gamma parameter (focusing parameter, default 2.0)
-            use_two_stage: Use two-stage classification for extreme imbalance
-            two_stage_binary: Stage 1 separates Low vs Not-Low (if true) or Low+Medium vs High (if false)
-            cost_sensitive_enabled: Enable cost-sensitive learning with ordinal penalty
-            distant_class_penalty: Multiplier for |pred - true| == 2
-            **xgb_params: Additional XGBoost parameters
-        """
         self.num_classes = num_classes
         self.use_gpu = use_gpu
         self.early_stopping_rounds = early_stopping_rounds
@@ -120,9 +94,8 @@ class EngagementXGBoost:
         self.distant_class_penalty = distant_class_penalty
         self.state_strategies = state_strategies or {}
 
-        # Default XGBoost parameters
         self.default_params = {
-            "objective": "multi:softprob",
+            "objective": "multiclass",
             "num_class": num_classes,
             "max_depth": 6,
             "learning_rate": 0.05,
@@ -130,48 +103,34 @@ class EngagementXGBoost:
             "subsample": 0.8,
             "colsample_bytree": 0.8,
             "min_child_weight": 3,
-            "gamma": 0.1,
             "reg_alpha": 0.1,
             "reg_lambda": 1.0,
             "random_state": 42,
             "n_jobs": max(1, math.floor((os.cpu_count() or 2) / 2)),
-            "verbosity": 0,
+            "verbosity": -1,
         }
 
-        # Update with user parameters
-        self.default_params.update(xgb_params)
+        self.default_params.update(lgb_params)
 
-        # GPU settings
         if use_gpu:
-            self.default_params["tree_method"] = "hist"
-            self.default_params["device"] = "cuda"
+            self.default_params["device"] = "gpu"
 
-        # Initialize models for each affective state
         self.models = {state: None for state in self.AFFECTIVE_STATES}
 
-        # NEW: Two-stage models
-        # Stage 1: Binary classifier (Low vs Not-Low)
-        # Stage 2: Binary classifier (Medium vs High) for Not-Low samples
-        self.stage1_models: Dict[str, Optional[xgb.XGBClassifier]] = {
+        self.stage1_models: Dict[str, Optional[lgb.LGBMClassifier]] = {
             state: None for state in self.AFFECTIVE_STATES
         }
-        self.stage2_models: Dict[str, Optional[xgb.XGBClassifier]] = {
+        self.stage2_models: Dict[str, Optional[lgb.LGBMClassifier]] = {
             state: None for state in self.AFFECTIVE_STATES
         }
 
-        # Thresholds: {state: {class: threshold}}
         self.thresholds: Dict[str, Dict[int, float]] = {}
-
-        # NEW: Per-class thresholds
         self.per_class_thresholds_dict: Dict[str, Dict[int, float]] = {}
 
-        # Calibration models
         self.calibrated_models: Dict[str, Optional[CalibratedClassifierCV]] = {
             state: None for state in self.AFFECTIVE_STATES
         }
 
-        # NEW: Cost-sensitive learning penalty matrix
-        # cost[i][j] = penalty for predicting j when true is i
         self.cost_matrix: Optional[np.ndarray] = None
         if self.cost_sensitive_enabled:
             self.cost_matrix = self._build_cost_matrix(
@@ -185,21 +144,6 @@ class EngagementXGBoost:
     def _build_cost_matrix(
         self, num_classes: int, distant_penalty: float
     ) -> np.ndarray:
-        """
-        Build ordinal cost matrix for cost-sensitive learning.
-
-        Penalizes distant predictions more heavily:
-        - |pred - true| = 0: cost = 0 (correct)
-        - |pred - true| = 1: cost = 1 (adjacent class)
-        - |pred - true| = 2: cost = distant_penalty (most severe)
-
-        Args:
-            num_classes: Number of classes
-            distant_penalty: Penalty multiplier for |pred - true| == 2
-
-        Returns:
-            cost_matrix: (num_classes, num_classes) penalty matrix
-        """
         cost_matrix = np.zeros((num_classes, num_classes), dtype=np.float32)
         for i in range(num_classes):
             for j in range(num_classes):
@@ -215,87 +159,38 @@ class EngagementXGBoost:
     def _create_focal_loss_objective(
         self, num_classes: int, alpha: float, gamma: float
     ):
-        """
-        Create a focal loss objective function for XGBoost multi-class classification.
-
-        Focal loss down-weights easy examples (well-classified) and focuses on hard examples.
-        FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
-
-        Args:
-            num_classes: Number of classes
-            alpha: Weighting factor for focal loss (default 0.25)
-            gamma: Focusing parameter for focal loss (default 2.0)
-
-        Returns:
-            objective: A callable that returns gradient and hessian
-        """
-
         def focal_loss_objective(y_true: np.ndarray, y_pred: np.ndarray):
-            """
-            Focal loss objective for XGBClassifier.
-
-            Args:
-                y_true: True labels, shape (n_samples,)
-                y_pred: Raw predictions from XGBoost, shape (n_samples * n_classes,)
-
-            Returns:
-                grad: Gradient, shape (n_samples, n_classes) - XGBoost 2.1.0+ format
-                hess: Hessian, shape (n_samples, n_classes) - XGBoost 2.1.0+ format
-            """
             labels = y_true.astype(int)
             n_samples = len(labels)
 
-            # Reshape predictions to (n_samples, n_classes)
             preds_matrix = y_pred.reshape(n_samples, num_classes)
 
-            # Apply softmax to get probabilities
             max_preds = np.max(preds_matrix, axis=1, keepdims=True)
-            exp_preds = np.exp(preds_matrix - max_preds)  # Numerical stability
+            exp_preds = np.exp(preds_matrix - max_preds)
             probs = exp_preds / np.sum(exp_preds, axis=1, keepdims=True)
 
-            # Create one-hot encoded labels
             y_one_hot = np.zeros_like(probs)
             y_one_hot[np.arange(n_samples), labels] = 1
 
-            # Compute p_t (probability of the correct class)
-            p_t = (probs * y_one_hot).sum(axis=1, keepdims=True)  # (n_samples, 1)
-            p_t = np.clip(p_t, 1e-8, 1.0 - 1e-8)  # Numerical stability
+            p_t = (probs * y_one_hot).sum(axis=1, keepdims=True)
+            p_t = np.clip(p_t, 1e-8, 1.0 - 1e-8)
 
-            # Focal weight: (1 - p_t)^gamma
             focal_weight = (1.0 - p_t) ** gamma
 
-            # Gradient for focal loss
-            # grad = alpha * focal_weight * (probs - y_one_hot)
             grad = alpha * focal_weight * (probs - y_one_hot)
-
-            # Hessian (approximation)
             hess = np.abs(alpha * focal_weight * probs * (1.0 - probs)) + 1e-6
 
-            # Flatten to 1D arrays as required by XGBoost 2.x sklearn API
             return grad.astype(np.float32).flatten(), hess.astype(np.float32).flatten()
 
         return focal_loss_objective
 
     def _compute_scale_pos_weight(self, y: np.ndarray) -> Dict[int, float]:
-        """
-        Compute XGBoost scale_pos_weight for each class pair.
-
-        For multi-class, we compute class weights and convert to
-        sample weights for the classifier.
-
-        Args:
-            y: Target labels
-
-        Returns:
-            class_weights: Dictionary mapping class to weight
-        """
         from collections import Counter
 
         class_counts = Counter(y)
         total = len(y)
         n_classes = len(class_counts)
 
-        # Compute weights: inverse frequency (balanced)
         weights = {
             cls: total / (n_classes * count)
             for cls, count in class_counts.items()
@@ -306,57 +201,28 @@ class EngagementXGBoost:
     def _compute_cost_sensitive_weights(
         self, y: np.ndarray, class_weights: Dict[int, float]
     ) -> np.ndarray:
-        """
-        Compute cost-sensitive sample weights using ordinal penalty matrix.
-
-        For each sample, weight = class_weight * (1 + expected misclassification cost).
-        This penalizes confusing distant classes more heavily.
-
-        Args:
-            y: Target labels
-            class_weights: Base class weights from inverse frequency
-
-        Returns:
-            sample_weights: Weight for each sample
-        """
         if self.cost_matrix is None:
-            # Fallback to standard class weights
             return np.array([class_weights[label] for label in y])
 
-        # Compute expected misclassification cost for each sample
-        # Higher cost for minority classes (they're more likely to be misclassified)
         sample_weights = np.zeros(len(y), dtype=np.float32)
 
         for i, label in enumerate(y):
-            # Expected cost = average penalty if misclassified into any other class
             expected_cost = 0.0
             for pred_class in range(self.num_classes):
                 if pred_class != label:
                     expected_cost += self.cost_matrix[label, pred_class]
-            # Normalize by number of possible misclassifications
             expected_cost /= max(1, self.num_classes - 1)
 
-            # Combine with class weight
             sample_weights[i] = class_weights.get(label, 1.0) * (1.0 + expected_cost)
 
         return sample_weights
 
     def _compute_class_weights(self, y: np.ndarray) -> Dict[int, float]:
-        """
-        Compute class weights for imbalanced data.
-
-        Args:
-            y: Target labels
-
-        Returns:
-            class_weights: Dictionary mapping class to weight
-        """
         from collections import Counter
 
         class_counts = Counter(y)
         total = len(y)
 
-        # Compute weights: inverse frequency (balanced)
         weights = {
             cls: total / (len(class_counts) * count)
             for cls, count in class_counts.items()
@@ -370,20 +236,8 @@ class EngagementXGBoost:
         y: np.ndarray,
         random_state: int = 42,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Apply SMOTE oversampling to training data.
-
-        Args:
-            X: Training features
-            y: Training labels
-            random_state: Random seed
-
-        Returns:
-            X_resampled, y_resampled: Oversampled data
-        """
         from imblearn.over_sampling import SMOTE
 
-        # Handle NaN values - replace with 0 (SMOTE doesn't accept NaN)
         nan_count = np.isnan(X).sum()
         if nan_count > 0:
             print(
@@ -391,25 +245,21 @@ class EngagementXGBoost:
             )
             X = np.nan_to_num(X, nan=0.0)
 
-        # Validate and convert smote_strategy to valid SMOTE sampling_strategy
-        # Valid values: 'minority', 'not minority', 'auto', 'not majority', 'all', float, dict
         valid_strategies = {"minority", "not minority", "auto", "not majority", "all"}
         sampling_strategy = self.smote_strategy
 
-        # If strategy is 'smote' (config error), default to 'auto'
         if (
             isinstance(sampling_strategy, str)
             and sampling_strategy not in valid_strategies
         ):
-            sampling_strategy = "auto"  # Default: balance all classes
+            sampling_strategy = "auto"
 
-        # Adaptive k_neighbors: ensure it's less than the smallest minority class count
         from collections import Counter
         class_counts = Counter(y)
         min_minority_count = min(count for cls, count in class_counts.items()
                                   if count < max(class_counts.values()))
         k_neighbors = min(self.smote_k_neighbors, min_minority_count - 1)
-        k_neighbors = max(k_neighbors, 1)  # At least 1 neighbor
+        k_neighbors = max(k_neighbors, 1)
 
         if k_neighbors < self.smote_k_neighbors:
             print(f"  Adjusted SMOTE k_neighbors from {self.smote_k_neighbors} to {k_neighbors} "
@@ -434,45 +284,18 @@ class EngagementXGBoost:
         y_val: Optional[np.ndarray],
         params: Dict,
         verbose: bool = True,
-    ) -> Tuple[xgb.XGBClassifier, xgb.XGBClassifier]:
-        """
-        Train two-stage classifier for extreme class imbalance.
-
-        Stage 1: Binary classifier (Low vs Not-Low)
-        Stage 2: Binary classifier (Medium vs High) for Not-Low samples
-
-        IMPROVED: Each stage now applies:
-        - scale_pos_weight for binary class balancing
-        - SMOTE for Stage 2 minority class when very imbalanced
-        - Cost-sensitive sample weighting for ordinal penalty
-
-        Args:
-            state: Affective state name
-            X_train: Training features
-            y_train: Training labels (0=Low, 1=Medium, 2=High)
-            X_val: Validation features
-            y_val: Validation labels
-            params: XGBoost parameters
-            verbose: Print progress
-
-        Returns:
-            stage1_model, stage2_model: Trained binary classifiers
-        """
+    ) -> Tuple[lgb.LGBMClassifier, lgb.LGBMClassifier]:
         if verbose:
             print(f"  Using two-stage classification for {state}...")
-            print(f"  Stage 1: Low(0) vs Not-Low(1,2)")
-            print(f"  Stage 2: Medium(1) vs High(2)")
+            print("  Stage 1: Low(0) vs Not-Low(1,2)")
+            print("  Stage 2: Medium(1) vs High(2)")
 
-        # ================================================================
-        # Stage 1: Binary classifier - Low(0) vs Not-Low(1,2)
-        # ================================================================
         y_train_stage1 = (y_train > 0).astype(int)
 
         if verbose:
             s1_dist = dict(zip(*np.unique(y_train_stage1, return_counts=True)))
             print(f"    Stage 1 original distribution: {s1_dist}")
 
-        # Compute scale_pos_weight for Stage 1
         s1_counts = np.bincount(y_train_stage1, minlength=2)
         if s1_counts[0] > 0 and s1_counts[1] > 0:
             scale_pos_weight_s1 = s1_counts[0] / s1_counts[1]
@@ -482,11 +305,9 @@ class EngagementXGBoost:
         if verbose:
             print(f"    Stage 1 scale_pos_weight: {scale_pos_weight_s1:.2f}")
 
-        # Apply SMOTE for Stage 1 if extremely imbalanced
         X_train_s1 = X_train.copy()
         y_train_s1 = y_train_stage1.copy()
 
-        # Use SMOTE for Stage 1 if minority class is < 30% of total
         minority_ratio_s1 = min(s1_counts) / max(s1_counts) if max(s1_counts) > 0 else 1.0
         if self.use_smote and minority_ratio_s1 < 0.3:
             if verbose:
@@ -498,17 +319,14 @@ class EngagementXGBoost:
                 s1_dist_after = dict(zip(*np.unique(y_train_s1, return_counts=True)))
                 print(f"    Stage 1 after SMOTE: {s1_dist_after}")
 
-        # Build Stage 1 params with scale_pos_weight
         s1_params = {k: v for k, v in params.items() if k not in ["objective", "num_class"]}
         s1_params["scale_pos_weight"] = scale_pos_weight_s1
-        # Lower learning rate and more trees for imbalanced data
         s1_params.setdefault("max_depth", 6)
         s1_params.setdefault("min_child_weight", 1)
 
-        stage1_model = xgb.XGBClassifier(
+        stage1_model = lgb.LGBMClassifier(
             **s1_params,
-            objective="binary:logistic",
-            eval_metric="logloss",
+            objective="binary",
             early_stopping_rounds=self.early_stopping_rounds
             if X_val is not None
             else None,
@@ -518,7 +336,6 @@ class EngagementXGBoost:
         if X_val is not None and y_val is not None:
             y_val_stage1 = (y_val > 0).astype(int)
             fit_args_s1["eval_set"] = [(X_val, y_val_stage1)]
-            fit_args_s1["verbose"] = False
 
         stage1_model.fit(**fit_args_s1)
 
@@ -527,20 +344,16 @@ class EngagementXGBoost:
             s1_train_acc = accuracy_score(y_train_stage1, s1_train_pred)
             print(f"    Stage 1 training accuracy: {s1_train_acc:.4f}")
 
-        # ================================================================
-        # Stage 2: Binary classifier - Medium(1) vs High(2)
-        # ================================================================
         not_low_mask = y_train > 0
         X_train_stage2 = X_train[not_low_mask]
         y_train_stage2_raw = y_train[not_low_mask]
 
-        # Convert to binary: Medium(0) vs High(1)
         y_train_stage2 = (y_train_stage2_raw > 1).astype(int)
 
         if len(np.unique(y_train_stage2)) < 2:
             if verbose:
                 print(
-                    f"    Warning: Only one class in stage 2. Skipping stage 2 training."
+                    "    Warning: Only one class in stage 2. Skipping stage 2 training."
                 )
             stage2_model = None
         else:
@@ -548,7 +361,6 @@ class EngagementXGBoost:
                 s2_dist = dict(zip(*np.unique(y_train_stage2, return_counts=True)))
                 print(f"    Stage 2 original distribution: {s2_dist}")
 
-            # Compute scale_pos_weight for Stage 2
             s2_counts = np.bincount(y_train_stage2, minlength=2)
             if s2_counts[0] > 0 and s2_counts[1] > 0:
                 scale_pos_weight_s2 = s2_counts[0] / s2_counts[1]
@@ -558,7 +370,6 @@ class EngagementXGBoost:
             if verbose:
                 print(f"    Stage 2 scale_pos_weight: {scale_pos_weight_s2:.2f}")
 
-            # Apply SMOTE for Stage 2 if extremely imbalanced
             X_train_s2 = X_train_stage2.copy()
             y_train_s2 = y_train_stage2.copy()
 
@@ -574,16 +385,14 @@ class EngagementXGBoost:
                     s2_dist_after = dict(zip(*np.unique(y_train_s2, return_counts=True)))
                     print(f"    Stage 2 after SMOTE: {s2_dist_after}")
 
-            # Build Stage 2 params with scale_pos_weight
             s2_params = {k: v for k, v in params.items() if k not in ["objective", "num_class"]}
             s2_params["scale_pos_weight"] = scale_pos_weight_s2
             s2_params.setdefault("max_depth", 6)
             s2_params.setdefault("min_child_weight", 1)
 
-            stage2_model = xgb.XGBClassifier(
+            stage2_model = lgb.LGBMClassifier(
                 **s2_params,
-                objective="binary:logistic",
-                eval_metric="logloss",
+                objective="binary",
                 early_stopping_rounds=self.early_stopping_rounds
                 if X_val is not None
                 else None,
@@ -597,7 +406,6 @@ class EngagementXGBoost:
                     y_val_stage2 = (y_val[not_low_val_mask] > 1).astype(int)
                     if len(np.unique(y_val_stage2)) >= 2:
                         fit_args_s2["eval_set"] = [(X_val_stage2, y_val_stage2)]
-                        fit_args_s2["verbose"] = False
 
             stage2_model.fit(**fit_args_s2)
 
@@ -620,23 +428,8 @@ class EngagementXGBoost:
         verbose: bool = True,
         state_specific_params: Optional[Dict[str, Dict]] = None,
     ):
-        """
-        Train XGBoost models for all affective states.
-
-        Args:
-            X: Training features (num_samples, num_features)
-            y: Dictionary of training labels for each state
-            X_val: Validation features (optional, for early stopping)
-            y_val: Dictionary of validation labels (optional)
-            X_calib: Calibration features (separate from validation)
-            y_calib: Dictionary of calibration labels (separate from validation)
-            feature_names: List of feature names
-            verbose: Print training progress
-            state_specific_params: Per-state hyperparameters (dict: state -> params)
-        """
         self.feature_names = feature_names
 
-        # Handle NaN values in training data
         nan_count = np.isnan(X).sum()
         if nan_count > 0:
             if verbose:
@@ -645,7 +438,6 @@ class EngagementXGBoost:
                 )
             X = np.nan_to_num(X, nan=0.0)
 
-        # Handle NaN values in validation data if present
         if X_val is not None:
             nan_count_val = np.isnan(X_val).sum()
             if nan_count_val > 0:
@@ -655,7 +447,6 @@ class EngagementXGBoost:
                     )
                 X_val = np.nan_to_num(X_val, nan=0.0)
 
-        # Handle NaN values in calibration data if present
         if X_calib is not None:
             nan_count_calib = np.isnan(X_calib).sum()
             if nan_count_calib > 0:
@@ -667,14 +458,14 @@ class EngagementXGBoost:
 
         if verbose:
             print("=" * 80)
-            print("TRAINING XGBOOST MODELS")
+            print("TRAINING LIGHTGBM MODELS")
             print("=" * 80)
             print(f"Training samples: {X.shape[0]}")
             print(f"Feature dimension: {X.shape[1]}")
             print(f"Using GPU: {self.use_gpu}")
             if self.use_smote:
                 print(
-                    f"⚠ WARNING: SMOTE enabled in {X.shape[1]}D space. Consider disabling for high-D data."
+                    f"  WARNING: SMOTE enabled in {X.shape[1]}D space. Consider disabling for high-D data."
                 )
             print(f"SMOTE: {self.use_smote}")
             print(f"Focal Loss: {self.use_focal_loss}")
@@ -693,9 +484,7 @@ class EngagementXGBoost:
                 print(f"  Per-class: {self.per_class_thresholds}")
                 print(f"  Ordinal-aware: {self.ordinal_aware}")
 
-        # Train model for each affective state
         for state in self.AFFECTIVE_STATES:
-            # Determine strategy for this state: "auto", "standard", "two_stage"
             strategy = self.state_strategies.get(state, "auto")
             use_two_stage_for_state = self.use_two_stage
             if strategy == "standard":
@@ -712,13 +501,11 @@ class EngagementXGBoost:
 
             y_train = y[state]
 
-            # Get state-specific params or use defaults
             if state_specific_params and state in state_specific_params:
                 params = {**self.default_params, **state_specific_params[state]}
             else:
                 params = self.default_params
 
-            # Apply SMOTE if enabled (unified approach)
             X_train_state = X.copy()
             y_train_state = y_train.copy()
 
@@ -730,7 +517,7 @@ class EngagementXGBoost:
                     )
                     if X.shape[1] > 500:
                         print(
-                            f"  ⚠ WARNING: SMOTE in {X.shape[1]}D space may produce noisy synthetic samples."
+                            f"  WARNING: SMOTE in {X.shape[1]}D space may produce noisy synthetic samples."
                         )
 
                 X_train_state, y_train_state = self._apply_smote(
@@ -742,9 +529,8 @@ class EngagementXGBoost:
                         f"  Resampled distribution: {dict(zip(*np.unique(y_train_state, return_counts=True)))}"
                     )
 
-            # Compute class weights on (possibly resampled) data
             class_weights = self._compute_class_weights(y_train_state)
-            scale_pos_weights = self._compute_scale_pos_weight(y_train_state)
+            self._compute_scale_pos_weight(y_train_state)
 
             if verbose:
                 print("Class distribution and weights:")
@@ -756,7 +542,6 @@ class EngagementXGBoost:
                         f"  Class {cls}: {count:5d} ({pct:5.1f}%) - weight: {weight:.2f}"
                     )
 
-            # Two-stage classification (per-state strategy)
             if use_two_stage_for_state and self.num_classes == 3:
                 stage1_model, stage2_model = self._train_two_stage(
                     state,
@@ -769,42 +554,34 @@ class EngagementXGBoost:
                 )
                 self.stage1_models[state] = stage1_model
                 self.stage2_models[state] = stage2_model
-                # Skip standard model training when using two-stage
                 model = None
             else:
-                # Create standard multi-class model
                 if self.use_focal_loss:
-                    # Use focal loss custom objective
                     focal_obj = self._create_focal_loss_objective(
                         num_classes=params.get("num_class", self.num_classes),
                         alpha=self.focal_alpha,
                         gamma=self.focal_gamma,
                     )
-                    # Remove default objective and num_class from params
                     params_focal = {
                         k: v
                         for k, v in params.items()
                         if k not in ["objective", "num_class"]
                     }
-                    model = xgb.XGBClassifier(
+                    model = lgb.LGBMClassifier(
                         **params_focal,
-                        num_class=params.get("num_class", self.num_classes),
                         objective=focal_obj,
                         early_stopping_rounds=self.early_stopping_rounds
                         if X_val is not None
                         else None,
                     )
                 else:
-                    model = xgb.XGBClassifier(
+                    model = lgb.LGBMClassifier(
                         **params,
                         early_stopping_rounds=self.early_stopping_rounds
                         if X_val is not None
                         else None,
                     )
 
-                # Prepare training arguments
-                # Note: When using focal loss, don't use sample_weight since focal loss
-                # already handles class imbalance via the focal weighting mechanism
                 if self.use_focal_loss:
                     if verbose:
                         print(
@@ -815,7 +592,6 @@ class EngagementXGBoost:
                         "y": y_train_state,
                     }
                 else:
-                    # NEW: Compute cost-sensitive sample weights
                     if self.cost_sensitive_enabled and self.cost_matrix is not None:
                         sample_weights = self._compute_cost_sensitive_weights(
                             y_train_state, class_weights
@@ -832,33 +608,23 @@ class EngagementXGBoost:
                         "sample_weight": sample_weights,
                     }
 
-                # Add validation set if provided
                 if X_val is not None and y_val is not None:
                     fit_args["eval_set"] = [(X_val, y_val[state])]
-                    fit_args["verbose"] = False  # Quieter during training
 
-                # Train model
                 model.fit(**fit_args)
 
-                # Store base model
                 self.models[state] = model
 
-            # Calibrate probabilities if enabled and calibration data provided
-            # NOTE: Calibration is only applied to standard multi-class models.
-            # Two-stage binary models do not use sklearn CalibratedClassifierCV.
             if (
                 self.calibrate_probabilities
                 and X_calib is not None
                 and y_calib is not None
-                and model is not None  # Skip for two-stage (model is None)
+                and model is not None
             ):
                 if verbose:
                     print("Calibrating probabilities...")
 
-                # For sklearn >= 1.6, cv='prefit' is deprecated
-                # We create a fresh XGBoost model and fit with calibration
                 try:
-                    # Method 1: Try using cv='prefit' for older sklearn
                     calibrated = CalibratedClassifierCV(
                         model,
                         method=self.calibration_method,
@@ -867,10 +633,9 @@ class EngagementXGBoost:
                     calibrated.fit(X_calib, y_calib[state])
                     self.calibrated_models[state] = calibrated
                 except (ValueError, TypeError):
-                    # Method 2: Fallback - train a fresh calibrated model
                     if verbose:
                         print("  Using cross-validation calibration...")
-                    calib_model = xgb.XGBClassifier(**params)
+                    calib_model = lgb.LGBMClassifier(**params)
                     calib_model.fit(X_calib, y_calib[state])
                     calibrated = CalibratedClassifierCV(
                         calib_model,
@@ -889,15 +654,14 @@ class EngagementXGBoost:
             if verbose:
                 if model is not None:
                     best_iteration = (
-                        model.best_iteration
-                        if hasattr(model, "best_iteration")
+                        model.best_iteration_
+                        if hasattr(model, "best_iteration_")
                         else params.get("n_estimators", 300)
                     )
-                    print(f"✓ Training complete - Best iteration: {best_iteration}")
+                    print(f"  Training complete - Best iteration: {best_iteration}")
                 else:
-                    print(f"✓ Training complete (two-stage)")
+                    print("  Training complete (two-stage)")
 
-        # Optimize thresholds if enabled and validation data provided
         if self.optimize_thresholds and X_val is not None and y_val is not None:
             self._optimize_all_thresholds(X_val, y_val, verbose)
 
@@ -907,7 +671,7 @@ class EngagementXGBoost:
 
         if verbose:
             print("\n" + "=" * 80)
-            print("✓ ALL MODELS TRAINED SUCCESSFULLY")
+            print("  ALL MODELS TRAINED SUCCESSFULLY")
             print("=" * 80)
 
     def _optimize_all_thresholds(
@@ -916,16 +680,6 @@ class EngagementXGBoost:
         y_val: Dict[str, np.ndarray],
         verbose: bool = True,
     ):
-        """
-        Optimize classification thresholds for all states.
-
-        Supports per-class threshold optimization and ordinal-aware constraints.
-
-        Args:
-            X_val: Validation features
-            y_val: Dictionary of validation labels
-            verbose: Print optimization progress
-        """
         if verbose:
             print("\n" + "=" * 80)
             print("OPTIMIZING CLASSIFICATION THRESHOLDS")
@@ -939,9 +693,7 @@ class EngagementXGBoost:
             if verbose:
                 print(f"\nOptimizing thresholds for {state}:")
 
-            # Get probabilities
             if self.use_two_stage and self.stage1_models[state] is not None:
-                # Two-stage prediction
                 probs = self._predict_proba_two_stage(state, X_val)
             elif self.is_calibrated and self.calibrated_models[state] is not None:
                 probs = self.calibrated_models[state].predict_proba(X_val)
@@ -951,13 +703,11 @@ class EngagementXGBoost:
             y_true = y_val[state]
 
             if self.per_class_thresholds:
-                # Optimize separate threshold for each class
                 optimal_thresholds = self._find_per_class_thresholds(
                     probs, y_true, verbose=verbose
                 )
                 self.per_class_thresholds_dict[state] = optimal_thresholds
             else:
-                # Optimize single global threshold
                 optimal_thresholds = self._find_optimal_thresholds(
                     probs, y_true, verbose=verbose
                 )
@@ -970,31 +720,15 @@ class EngagementXGBoost:
         y_true: np.ndarray,
         verbose: bool = True,
     ) -> Dict[int, float]:
-        """
-        Find optimal threshold for each class individually.
-
-        For each class, optimizes threshold to maximize F1-score
-        for that specific class (one-vs-rest).
-
-        Args:
-            probs: Predicted probabilities (n_samples, n_classes)
-            y_true: True labels
-            verbose: Print progress
-
-        Returns:
-            thresholds: Dictionary mapping class to optimal threshold
-        """
         n_classes = probs.shape[1]
         best_thresholds = {}
 
         for cls in range(n_classes):
-            # One-vs-rest labels
             y_binary = (y_true == cls).astype(int)
 
             best_f1 = 0.0
             best_thresh = 0.5
 
-            # Grid search over thresholds
             threshold_range = np.arange(0.1, 0.9, 0.02)
 
             for threshold in threshold_range:
@@ -1013,17 +747,11 @@ class EngagementXGBoost:
                     f"  Class {cls}: threshold={best_thresh:.2f}, F1={best_f1:.4f} (n={cls_count})"
                 )
 
-        # NEW: Apply ordinal constraints if enabled
         if self.ordinal_aware and n_classes == 3:
-            # Ensure thresholds respect ordinal ordering
-            # Typically: threshold(Low) <= threshold(Medium) <= threshold(High)
-            # or some other logical ordering
             t0 = best_thresholds.get(0, 0.5)
             t1 = best_thresholds.get(1, 0.5)
             t2 = best_thresholds.get(2, 0.5)
 
-            # For ordinal classes, enforce monotonicity in decision boundaries
-            # This is a heuristic: adjust to be roughly monotonic
             if t0 > t1:
                 t0 = (t0 + t1) / 2
                 t1 = t0
@@ -1046,33 +774,15 @@ class EngagementXGBoost:
         y_true: np.ndarray,
         verbose: bool = True,
     ) -> Dict[int, float]:
-        """
-        Find optimal single threshold for all classes.
-
-        Uses grid search to find thresholds that maximize F1-macro.
-
-        Args:
-            probs: Predicted probabilities (n_samples, n_classes)
-            y_true: True labels
-            verbose: Print progress
-
-        Returns:
-            thresholds: Dictionary mapping class to threshold
-        """
         n_classes = probs.shape[1]
         best_thresholds = {}
         best_f1 = 0.0
 
-        # Grid search over threshold combinations
         threshold_range = np.arange(0.1, 0.9, 0.05)
 
-        # For multi-class, we optimize a single decision threshold
-        # that's applied to all classes equally
         for threshold in threshold_range:
-            # Predict using threshold
             y_pred = self._predict_with_threshold(probs, threshold)
 
-            # Compute F1
             f1 = f1_score(y_true, y_pred, average="macro")
 
             if f1 > best_f1:
@@ -1091,60 +801,32 @@ class EngagementXGBoost:
         probs: np.ndarray,
         threshold: float,
     ) -> np.ndarray:
-        """
-        Predict using threshold.
-
-        For multi-class, apply softmax-like decision:
-        - If max probability > threshold, predict that class
-        - Otherwise, predict the middle class (conservative default for
-          low-confidence predictions)
-
-        Args:
-            probs: Predicted probabilities
-            threshold: Decision threshold
-
-        Returns:
-            predictions: Predicted class labels
-        """
         n_classes = probs.shape[1]
-        default_class = n_classes // 2  # conservative middle class
+        default_class = n_classes // 2
         predictions = []
         for prob in probs:
             max_prob = np.max(prob)
             if max_prob > threshold:
                 predictions.append(np.argmax(prob))
             else:
-                # Low confidence: fall back to conservative middle class
                 predictions.append(default_class)
 
         return np.array(predictions)
 
     def predict_proba(self, X: np.ndarray) -> Dict[str, np.ndarray]:
-        """
-        Predict class probabilities.
-
-        Args:
-            X: Features (num_samples, num_features)
-
-        Returns:
-            predictions: Dictionary of probability distributions per state
-        """
         if not self.is_fitted:
             raise RuntimeError(
                 "Model must be fitted before prediction. Call fit() first."
             )
 
-        # Handle NaN values in test data
         X = np.nan_to_num(X, nan=0.0)
 
         predictions = {}
         for state in self.AFFECTIVE_STATES:
-            # Check per-state strategy
             strategy = self.state_strategies.get(state, "auto")
             use_two_stage_state = self.use_two_stage if strategy == "auto" else (strategy == "two_stage")
 
             if use_two_stage_state and self.stage1_models[state] is not None:
-                # Two-stage prediction
                 predictions[state] = self._predict_proba_two_stage(state, X)
             elif self.is_calibrated and self.calibrated_models[state] is not None:
                 predictions[state] = self.calibrated_models[state].predict_proba(X)
@@ -1156,53 +838,29 @@ class EngagementXGBoost:
     def _predict_proba_two_stage(
         self, state: str, X: np.ndarray
     ) -> np.ndarray:
-        """
-        Predict probabilities using two-stage classifier.
-
-        Stage 1: P(Not-Low | x)
-        Stage 2: P(High | Not-Low, x)
-
-        Combines into 3-class probabilities:
-        P(Low) = P(Low | Stage 1)
-        P(Medium) = P(Not-Low | Stage 1) * P(Medium | Stage 2)
-        P(High) = P(Not-Low | Stage 1) * P(High | Stage 2)
-
-        Args:
-            state: Affective state name
-            X: Features
-
-        Returns:
-            probs: (n_samples, 3) probability distribution
-        """
         stage1_model = self.stage1_models[state]
         stage2_model = self.stage2_models[state]
 
-        # Stage 1: Probability of Not-Low
-        s1_probs = stage1_model.predict_proba(X)  # (n_samples, 2)
-        p_not_low = s1_probs[:, 1]  # P(Not-Low)
-        p_low = s1_probs[:, 0]  # P(Low)
+        s1_probs = stage1_model.predict_proba(X)
+        p_not_low = s1_probs[:, 1]
+        p_low = s1_probs[:, 0]
 
         n_samples = len(X)
         probs = np.zeros((n_samples, 3), dtype=np.float32)
-        probs[:, 0] = p_low  # P(Low)
+        probs[:, 0] = p_low
 
         if stage2_model is not None:
-            # Stage 2: Probability of High given Not-Low
-            s2_probs = stage2_model.predict_proba(X)  # (n_samples, 2)
+            s2_probs = stage2_model.predict_proba(X)
             p_high_given_not_low = s2_probs[:, 1]
             p_medium_given_not_low = s2_probs[:, 0]
 
-            # Combine
-            probs[:, 1] = p_not_low * p_medium_given_not_low  # P(Medium)
-            probs[:, 2] = p_not_low * p_high_given_not_low  # P(High)
+            probs[:, 1] = p_not_low * p_medium_given_not_low
+            probs[:, 2] = p_not_low * p_high_given_not_low
         else:
-            # Stage 2 not available (only one class in Not-Low)
-            # Assign all Not-Low probability to Medium
             probs[:, 1] = p_not_low
 
-        # Normalize to ensure probabilities sum to 1
         row_sums = probs.sum(axis=1, keepdims=True)
-        row_sums = np.where(row_sums == 0, 1, row_sums)  # Avoid division by zero
+        row_sums = np.where(row_sums == 0, 1, row_sums)
         probs = probs / row_sums
 
         return probs
@@ -1212,16 +870,6 @@ class EngagementXGBoost:
         X: np.ndarray,
         use_thresholds: bool = True,
     ) -> Dict[str, np.ndarray]:
-        """
-        Predict class labels.
-
-        Args:
-            X: Features (num_samples, num_features)
-            use_thresholds: Whether to use optimized thresholds
-
-        Returns:
-            labels: Dictionary of predicted class indices per state
-        """
         if not self.is_fitted:
             raise RuntimeError(
                 "Model must be fitted before prediction. Call fit() first."
@@ -1231,27 +879,20 @@ class EngagementXGBoost:
         probs = self.predict_proba(X)
 
         for state in self.AFFECTIVE_STATES:
-            # Check per-state strategy
-            strategy = self.state_strategies.get(state, "auto")
-            use_two_stage_state = self.use_two_stage if strategy == "auto" else (strategy == "two_stage")
-
             if (
                 use_thresholds
                 and self.per_class_thresholds
                 and state in self.per_class_thresholds_dict
                 and self.per_class_thresholds_dict[state]
             ):
-                # Use per-class optimized thresholds
                 thresholds = self.per_class_thresholds_dict[state]
                 labels[state] = self._predict_with_per_class_thresholds(
                     probs[state], thresholds
                 )
             elif use_thresholds and state in self.thresholds and self.thresholds[state]:
-                # Use optimized single threshold
                 threshold = list(self.thresholds[state].values())[0]
                 labels[state] = self._predict_with_threshold(probs[state], threshold)
             else:
-                # Default argmax
                 labels[state] = np.argmax(probs[state], axis=1)
 
         return labels
@@ -1261,33 +902,17 @@ class EngagementXGBoost:
         probs: np.ndarray,
         thresholds: Dict[int, float],
     ) -> np.ndarray:
-        """
-        Predict using per-class thresholds.
-
-        For each sample, find the class with the highest probability
-        that also exceeds its class-specific threshold.
-
-        Args:
-            probs: Predicted probabilities (n_samples, n_classes)
-            thresholds: Dictionary mapping class to threshold
-
-        Returns:
-            predictions: Predicted class labels
-        """
         n_samples, n_classes = probs.shape
         predictions = np.zeros(n_samples, dtype=int)
 
         for i in range(n_samples):
-            # Find classes that exceed their threshold
             valid_classes = [
                 cls for cls in range(n_classes) if probs[i, cls] > thresholds.get(cls, 0.5)
             ]
 
             if valid_classes:
-                # Pick the class with highest probability among valid ones
                 predictions[i] = max(valid_classes, key=lambda c: probs[i, c])
             else:
-                # No class exceeds threshold: pick the one with highest prob
                 predictions[i] = np.argmax(probs[i])
 
         return predictions
@@ -1299,20 +924,6 @@ class EngagementXGBoost:
         verbose: bool = True,
         use_thresholds: bool = True,
     ) -> Dict[str, Dict[str, float]]:
-        """
-        Evaluate model on test set.
-
-        NEW: Reports per-class precision/recall/F1 for minority class diagnosis.
-
-        Args:
-            X: Test features
-            y: True labels
-            verbose: Print evaluation results
-            use_thresholds: Whether to use optimized thresholds
-
-        Returns:
-            metrics: Dictionary of metrics per state
-        """
         predictions = self.predict(X, use_thresholds=use_thresholds)
 
         metrics = {}
@@ -1326,7 +937,6 @@ class EngagementXGBoost:
             y_true = y[state]
             y_pred = predictions[state]
 
-            # Compute aggregate metrics
             accuracy = accuracy_score(y_true, y_pred)
             f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
             f1_weighted = f1_score(y_true, y_pred, average="weighted", zero_division=0)
@@ -1337,7 +947,6 @@ class EngagementXGBoost:
                 "f1_weighted": f1_weighted,
             }
 
-            # NEW: Per-class metrics
             present_labels = sorted(np.unique(np.concatenate([y_true, y_pred])))
             class_names = ["Low", "Medium", "High"]
 
@@ -1354,7 +963,6 @@ class EngagementXGBoost:
                 metrics[state][f"recall_{cls_name.lower()}"] = rec
                 metrics[state][f"f1_{cls_name.lower()}"] = f1
 
-            # NEW: Class distribution analysis
             true_dist = {
                 class_names[i]: int((y_true == i).sum()) for i in range(self.num_classes)
             }
@@ -1370,7 +978,6 @@ class EngagementXGBoost:
                 print(f"  F1 (macro):  {f1_macro:.4f}")
                 print(f"  F1 (weight): {f1_weighted:.4f}")
 
-                # NEW: Per-class metrics table
                 print("\n  Per-Class Metrics:")
                 print(f"    {'Class':<10s} {'Precision':>10s} {'Recall':>10s} {'F1':>10s} {'Support':>8s}")
                 print(f"    {'-'*10} {'-'*10} {'-'*10} {'-'*10} {'-'*8}")
@@ -1384,7 +991,6 @@ class EngagementXGBoost:
                         f"    {cls_name:<10s} {prec:>10.3f} {rec:>10.3f} {f1:>10.3f} {support:>8d}"
                     )
 
-                # NEW: Distribution comparison
                 print("\n  Class Distribution:")
                 print(f"    {'Class':<10s} {'True':>8s} {'Predicted':>10s} {'Diff':>8s}")
                 print(f"    {'-'*10} {'-'*8} {'-'*10} {'-'*8}")
@@ -1430,16 +1036,6 @@ class EngagementXGBoost:
     def get_feature_importance(
         self, top_k: int = 20, importance_type: str = "gain"
     ) -> Dict[str, List[Tuple[str, float]]]:
-        """
-        Get feature importance for each model.
-
-        Args:
-            top_k: Number of top features to return
-            importance_type: Type of importance ('gain', 'weight', 'cover')
-
-        Returns:
-            importance: Dictionary of top features per state
-        """
         if not self.is_fitted:
             raise RuntimeError(
                 "Model must be fitted before getting feature importance."
@@ -1452,26 +1048,22 @@ class EngagementXGBoost:
 
         for state, model in self.models.items():
             if model is None:
-                # Two-stage model: skip feature importance for now
-                # TODO: Aggregate stage1 + stage2 feature importance
                 importance_dict[state] = []
                 continue
 
-            # Get feature importance
-            importance = model.get_booster().get_score(importance_type=importance_type)
+            importance = model.feature_importances_
 
-            # Sort by importance
-            sorted_importance = sorted(
-                importance.items(), key=lambda x: x[1], reverse=True
-            )
-
-            # Convert feature indices to names if available
             if self.feature_names is not None:
+                sorted_indices = np.argsort(importance)[::-1]
                 sorted_importance = [
-                    (self.feature_names[int(feat.replace("f", ""))], score)
-                    if feat.startswith("f")
-                    else (feat, score)
-                    for feat, score in sorted_importance
+                    (self.feature_names[idx], float(importance[idx]))
+                    for idx in sorted_indices
+                ]
+            else:
+                sorted_indices = np.argsort(importance)[::-1]
+                sorted_importance = [
+                    (f"feature_{idx}", float(importance[idx]))
+                    for idx in sorted_indices
                 ]
 
             importance_dict[state] = sorted_importance[:top_k]
@@ -1479,12 +1071,6 @@ class EngagementXGBoost:
         return importance_dict
 
     def save(self, filepath: str):
-        """
-        Save trained models to disk.
-
-        Args:
-            filepath: Path to save models (e.g., 'models/xgboost_models.pkl')
-        """
         if not self.is_fitted:
             raise RuntimeError("Cannot save unfitted models. Call fit() first.")
 
@@ -1511,57 +1097,23 @@ class EngagementXGBoost:
             "state_strategies": self.state_strategies,
         }
 
-        # Save two-stage models if present
         if self.use_two_stage:
             save_data["stage1_models"] = self.stage1_models
             save_data["stage2_models"] = self.stage2_models
 
-        # Save calibrated models if present
         if self.is_calibrated:
             save_data["calibrated_models"] = self.calibrated_models
 
-        # Save cost matrix if present
         if self.cost_matrix is not None:
             save_data["cost_matrix"] = self.cost_matrix
-
-        # Handle focal loss: Custom objectives can't be pickled
-        # We need to recreate models without the custom objective for pickling
-        if self.use_focal_loss:
-            # Temporarily replace custom objective with standard objective for saving
-            models_to_save = {}
-            for state, model in self.models.items():
-                if model is not None:
-                    # Get model params without the custom objective
-                    model_params = model.get_params()
-                    # Replace custom objective with standard multi:softprob
-                    model_params["objective"] = "multi:softprob"
-                    # Create a new model with standard objective
-                    import xgboost as xgb
-
-                    temp_model = xgb.XGBClassifier(**model_params)
-                    # Copy the booster from original model
-                    temp_model._Booster = model._Booster
-                    models_to_save[state] = temp_model
-                else:
-                    models_to_save[state] = None
-            save_data["models"] = models_to_save
 
         with open(filepath, "wb") as f:
             pickle.dump(save_data, f)
 
-        print(f"✓ XGBoost models saved to: {filepath}")
+        print(f"  LightGBM models saved to: {filepath}")
 
     @classmethod
-    def load(cls, filepath: str) -> "EngagementXGBoost":
-        """
-        Load trained models from disk.
-
-        Args:
-            filepath: Path to saved models
-
-        Returns:
-            model: Loaded EngagementXGBoost instance
-        """
+    def load(cls, filepath: str) -> "EngagementLightGBM":
         with open(filepath, "rb") as f:
             data = pickle.load(f)
 
@@ -1591,16 +1143,14 @@ class EngagementXGBoost:
         if model.is_calibrated and "calibrated_models" in data:
             model.calibrated_models = data["calibrated_models"]
 
-        # Load two-stage models if present
         if model.use_two_stage:
             model.stage1_models = data.get("stage1_models", {})
             model.stage2_models = data.get("stage2_models", {})
 
-        # Load cost matrix if present
         if "cost_matrix" in data:
             model.cost_matrix = data["cost_matrix"]
 
-        print(f"✓ XGBoost models loaded from: {filepath}")
+        print(f"  LightGBM models loaded from: {filepath}")
         return model
 
 
@@ -1616,41 +1166,23 @@ def hyperparameter_search(
     cfg: Optional[Dict] = None,
     use_smote: bool = False,
 ) -> Dict:
-    """
-    Perform hyperparameter search for one affective state.
-
-    Args:
-        X_train: Training features
-        y_train: Training labels
-        X_val:   Validation features
-        y_val:   Validation labels
-        state:   Which affective state to optimise
-        n_iter:  Number of iterations for random search
-        cv:      Number of cross-validation folds
-        n_jobs:  Parallel workers for RandomizedSearchCV
-        cfg:     Optional config dict
-        use_smote: Apply SMOTE before search
-
-    Returns:
-        best_params: Best hyperparameters found
-    """
     if n_jobs is None:
         n_jobs = max(1, math.floor((os.cpu_count() or 2) / 2))
 
     if cfg is None:
         config_path = (
-            Path(__file__).parent.parent.parent / "configs" / "config_xgboost.yaml"
+            Path(__file__).parent.parent.parent / "configs" / "config_lightgbm.yaml"
         )
         if not config_path.exists():
             raise FileNotFoundError(
-                f"config_xgboost.yaml not found at {config_path}. "
+                f"config_lightgbm.yaml not found at {config_path}. "
                 "Pass a cfg dict explicitly or ensure the config file exists."
             )
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
         print(f"Loaded base config from: {config_path}")
 
-    xgb_cfg = cfg.get("xgboost", {})
+    lgb_cfg = cfg.get("lightgbm", {})
     model_cfg = cfg.get("model", {})
 
     SEARCH_KEYS = {
@@ -1660,26 +1192,21 @@ def hyperparameter_search(
         "subsample",
         "colsample_bytree",
         "min_child_weight",
-        "gamma",
         "reg_alpha",
         "reg_lambda",
         "early_stopping_rounds",
     }
-    base_params = {k: v for k, v in xgb_cfg.items() if k not in SEARCH_KEYS}
+    base_params = {k: v for k, v in lgb_cfg.items() if k not in SEARCH_KEYS}
 
-    base_params.setdefault("objective", "multi:softprob")
+    base_params.setdefault("objective", "multiclass")
     base_params.setdefault("num_class", model_cfg.get("num_classes", 3))
     base_params.setdefault("random_state", 42)
     base_params["n_jobs"] = 1
+    base_params["verbosity"] = -1
 
-    if model_cfg.get("use_gpu", False):
-        base_params.setdefault("tree_method", "hist")
-
-    # Apply SMOTE if requested
     X_search = X_train.copy()
     y_search = y_train[state].copy()
 
-    # Handle NaN values before SMOTE
     nan_count = np.isnan(X_search).sum()
     if nan_count > 0:
         print(f"Warning: Found {nan_count} NaN values in features. Replacing with 0.")
@@ -1707,12 +1234,11 @@ def hyperparameter_search(
         "subsample": [0.7, 0.8, 0.9],
         "colsample_bytree": [0.7, 0.8, 0.9],
         "min_child_weight": [1, 3, 5],
-        "gamma": [0.0, 0.1, 0.2],
         "reg_alpha": [0.0, 0.1, 1.0],
         "reg_lambda": [0.5, 1.0, 2.0],
     }
 
-    base_model = xgb.XGBClassifier(**base_params)
+    base_model = lgb.LGBMClassifier(**base_params)
 
     search = RandomizedSearchCV(
         base_model,
@@ -1733,7 +1259,6 @@ def hyperparameter_search(
 
     print(f"\nBest CV score: {search.best_score_:.4f}")
 
-    # Evaluate on validation set
     val_pred = search.predict(X_val)
     val_acc = accuracy_score(y_val[state], val_pred)
     val_f1 = f1_score(y_val[state], val_pred, average="macro")
@@ -1746,10 +1271,9 @@ def hyperparameter_search(
 
 if __name__ == "__main__":
     print("=" * 80)
-    print("XGBOOST MODEL - TEST")
+    print("LIGHTGBM MODEL - TEST")
     print("=" * 80)
 
-    # Create synthetic data
     print("\nCreating synthetic data...")
     num_train = 1000
     num_test = 200
@@ -1758,7 +1282,6 @@ if __name__ == "__main__":
     X_train = np.random.randn(num_train, num_features).astype(np.float32)
     X_test = np.random.randn(num_test, num_features).astype(np.float32)
 
-    # Synthetic labels with imbalance (3 classes)
     y_train = {
         "boredom": np.random.choice([0, 1, 2], num_train, p=[0.3, 0.5, 0.2]),
         "engagement": np.random.choice([0, 1, 2], num_train, p=[0.2, 0.3, 0.5]),
@@ -1775,12 +1298,11 @@ if __name__ == "__main__":
 
     feature_names = [f"feature_{i}" for i in range(num_features)]
 
-    print(f"✓ Training data: {X_train.shape}")
-    print(f"✓ Test data: {X_test.shape}")
+    print(f"  Training data: {X_train.shape}")
+    print(f"  Test data: {X_test.shape}")
 
-    # Create and train model with all features
-    print("\nInitializing XGBoost model...")
-    model = EngagementXGBoost(
+    print("\nInitializing LightGBM model...")
+    model = EngagementLightGBM(
         num_classes=3,
         use_gpu=False,
         use_smote=True,
@@ -1802,7 +1324,6 @@ if __name__ == "__main__":
         verbose=True,
     )
 
-    # Test prediction
     print("\nTesting prediction...")
     predictions = model.predict(X_test)
     proba = model.predict_proba(X_test)
@@ -1811,10 +1332,8 @@ if __name__ == "__main__":
     for state, pred in predictions.items():
         print(f"  {state:12s}: {pred.shape}")
 
-    # Evaluate
     metrics = model.evaluate(X_test, y_test, verbose=True)
 
-    # Feature importance
     print("\n" + "=" * 80)
     print("TOP 10 FEATURES PER STATE")
     print("=" * 80)
@@ -1826,21 +1345,19 @@ if __name__ == "__main__":
         for i, (feat, score) in enumerate(top_features, 1):
             print(f"  {i:2d}. {feat:30s}: {score:.2f}")
 
-    # Save and load test
     print("\n" + "=" * 80)
     print("Testing save/load...")
-    model.save("test_xgboost.pkl")
+    model.save("test_lightgbm.pkl")
 
-    loaded_model = EngagementXGBoost.load("test_xgboost.pkl")
+    loaded_model = EngagementLightGBM.load("test_lightgbm.pkl")
 
-    # Test loaded model
     loaded_predictions = loaded_model.predict(X_test)
 
     if all(np.array_equal(predictions[s], loaded_predictions[s]) for s in predictions):
-        print("✓ Loaded model produces identical predictions!")
+        print("  Loaded model produces identical predictions!")
     else:
-        print("⚠ Warning: Predictions differ after loading")
+        print("  Warning: Predictions differ after loading")
 
     print("\n" + "=" * 80)
-    print("✓ XGBOOST MODEL TEST COMPLETE!")
+    print("  LIGHTGBM MODEL TEST COMPLETE!")
     print("=" * 80)

@@ -19,6 +19,13 @@ data:
   val_ratio:   0.10
   test_ratio:  0.10
   random_seed: 42
+  # Stratification strategy for train/val/test split
+  # Options:
+  #   - "engagement"  : stratify on engagement labels (default, robust)
+  #   - "composite"   : stratify on combined boredom+engagement+confusion+frustration
+  #                     (more balanced across all states but can fail with rare combos)
+  #   - any state name: e.g. "boredom", "confusion", "frustration"
+  stratify_state: "engagement"
 
 # --- Normalization ---
 normalization:
@@ -37,7 +44,7 @@ feature_engineering:
 # --- Feature Selection ---
 feature_selection:
   enabled: true
-  k_features: 2000
+  k_features: 500
   aggregation: "mean_rank"  # options: mean_rank | mean_score | max_score | sum_score
   # NEW: Multi-task feature selection with cross-task regularization
   use_multitask_lasso: false  # Use multi-task LASSO for feature selection
@@ -46,25 +53,38 @@ feature_selection:
 
 # --- Class Imbalance Handling ---
 imbalance_handling:
-  enabled: true
+  enabled: false               # DISABLED: SMOTE skipped
   strategy: "auto"            # Use SMOTE for minority class oversampling
   smote_k_neighbors: 5
   smote_random_state: 42
+  # NEW: Use XGBoost's built-in scale_pos_weight instead of SMOTE
+  use_scale_pos_weight: true
+  # NEW: Cost-sensitive learning matrix (higher cost for confusing distant classes)
+  cost_sensitive:
+    enabled: true
+    # Cost matrix: cost[i][j] = penalty for predicting j when true is i
+    # For ordinal classes 0=Low, 1=Medium, 2=High
+    # Higher penalty for |i-j| = 2 (e.g., Low predicted as High)
+    distant_class_penalty: 3.0
 
 # --- Threshold Optimization ---
 threshold_optimization:
   enabled: true
   metric: "f1_macro"
-  search_range_min: 0.2
-  search_range_max: 0.8
-  search_steps: 20
+  search_range_min: 0.1
+  search_range_max: 0.9
+  search_steps: 40
+  # NEW: Per-class threshold optimization (one threshold per class)
+  per_class_optimization: true
+  # NEW: Ordinal-aware threshold optimization (respects Low < Medium < High)
+  ordinal_aware: true
 
 # --- Probability Calibration ---
 calibration:
   enabled: true
-  method: "isotonic"      # options: isotonic | sigmoid
-  use_calibration_set: true
-  calibration_ratio: 0.15  # held out from training for calibration
+  method: "sigmoid"       # Platt scaling is more robust for small/imbalanced data
+  use_calibration_set: false  # Use validation set instead of separate calibration split
+  calibration_ratio: 0.15  # Only used if use_calibration_set=true (deprecated)
 
 # --- Model ---
 model:
@@ -82,16 +102,28 @@ xgboost:
   colsample_bytree: 0.8
   min_child_weight: 3
   gamma: 0.1
-  reg_alpha: 0.1       # L1 regularization
-  reg_lambda: 1.0      # L2 regularization
+  reg_alpha: 0.1
+  reg_lambda: 1.0
   random_state: 42
   n_jobs: -1
   verbosity: 0
   early_stopping_rounds: 50
 
+# --- Two-Stage Classification (for extreme imbalance) ---
+two_stage:
+  enabled: true
+  stage1_binary: true        # true = Low(0) vs Not-Low(1,2), false = Low+Medium(0,1) vs High(2)
+  stage1_objective: "binary:logistic"
+  stage2_objective: "binary:logistic"
+  # Separate hyperparameters for each stage (optimized for imbalanced binary)
+  stage1_max_depth: 6
+  stage1_n_estimators: 300
+  stage2_max_depth: 6
+  stage2_n_estimators: 300
+
 # --- Focal Loss (for class imbalance) ---
 focal_loss:
-  enabled: true        # Enable focal loss objective (recommended for imbalanced data)
+  enabled: false       # DISABLED: Use scale_pos_weight + cost-sensitive learning instead
   alpha: 0.25          # Weighting factor (0.25 = slight down-weighting of easy examples)
   gamma: 2.0           # Focusing parameter (2.0 = moderate focus on hard examples)
 
@@ -106,6 +138,11 @@ evaluation:
   # Feature importance top-k features to report
   feature_importance_top_k: 20
   feature_importance_type: "gain"   # options: gain | weight | cover
+  # NEW: Per-class metrics reporting (diagnose minority class failure)
+  per_class_metrics: true
+  class_names: ["Low", "Medium", "High"]
+  # NEW: Track class distribution in predictions vs ground truth
+  report_class_distribution: true
 
 # --- Feature Importance Analysis (Two-Stage) ---
 feature_importance:

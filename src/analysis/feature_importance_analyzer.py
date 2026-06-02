@@ -505,6 +505,15 @@ class FeatureImportanceAnalyzer:
             model = models[state]
             y_true = y_val[state]
 
+            # Handle binary stage1 models from two-stage classification.
+            # Stage1 separates Low(0) vs Not-Low(1,2) with binary labels.
+            # Permutation importance must use matching binary labels.
+            is_binary = hasattr(model, "classes_") and len(model.classes_) == 2
+            if is_binary:
+                y_true = (y_true > 0).astype(int)
+                if verbose:
+                    print(f"  Binary model detected — converting labels to binary (Low vs Not-Low)")
+
             # Define scorer
             if scoring == "f1_macro":
                 scorer = make_scorer(f1_score, average="macro", zero_division=0)

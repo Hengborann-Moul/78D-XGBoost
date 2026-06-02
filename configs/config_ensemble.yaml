@@ -168,6 +168,36 @@ evaluation:
     - frustration
 
 # ============================================================
+# Feature Importance Analysis (Two-Stage)
+# ============================================================
+feature_importance:
+  enabled: false                    # Enable two-stage feature importance analysis
+
+  # Stage 1: SHAP Analysis
+  shap:
+    background_samples: 100        # Background dataset size for SHAP explainer
+    sample_size: 200              # Number of samples to explain (null = all)
+    max_display_features: 30       # Max features to display in plots
+    compute_interactions: false    # Compute SHAP interaction values (slow)
+
+  # Stage 2: Permutation Importance
+  permutation:
+    n_repeats: 10                 # Number of permutation repeats
+    scoring: "f1_macro"            # Metric for importance ('f1_macro', 'f1_weighted', 'accuracy')
+    n_jobs: -1                    # Parallel jobs (-1 = all cores)
+
+  # Analysis Options
+  top_k: 50                        # Number of top features to analyze
+  compare_states: true            # Compare importance across states
+  identify_stable: true           # Find stable features across methods
+
+  # Output Options
+  output_subdir: "feature_importance"
+  save_shap_values: true          # Save raw SHAP values (.npy)
+  generate_report: true           # Generate JSON summary report
+  generate_plots: true            # Generate visualization plots
+
+# ============================================================
 # Output
 # ============================================================
 output:
