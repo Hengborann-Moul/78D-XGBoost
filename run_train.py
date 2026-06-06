@@ -73,6 +73,8 @@ from model.lstm_model import (
 )
 from model.xgboost_model import EngagementXGBoost
 from model.lightgbm_model import EngagementLightGBM
+from model.catboost_model import EngagementCatBoost
+from model.random_forest_model import EngagementRandomForest
 from normalization.feature_normalization import FeatureNormalizer
 from analysis.feature_importance_integration import (
     run_feature_importance_analysis,
@@ -98,7 +100,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         required=True,
-        choices=["lstm", "xgboost", "lightgbm", "ensemble"],
+        choices=["lstm", "xgboost", "lightgbm", "catboost", "random_forest", "ensemble"],
         help="Model type to train.",
     )
     return parser.parse_args()
@@ -1401,7 +1403,522 @@ def train_lightgbm(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
 
 
 # ---------------------------------------------------------------------------
-# Evaluation helpers (shared LSTM / XGBoost / LightGBM)
+# CatBoost training
+# ---------------------------------------------------------------------------
+
+
+def train_catboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
+    model_cfg = cfg["model"]
+    cb_cfg = cfg.get("catboost", {})
+    fe_cfg = cfg.get("feature_engineering", {})
+    fs_cfg = cfg.get("feature_selection", {})
+    imbalance_cfg = cfg.get("imbalance_handling", {})
+    threshold_cfg = cfg.get("threshold_optimization", {})
+    calib_cfg = cfg.get("calibration", {})
+
+    engineer_features = fe_cfg.get("enabled", True)
+
+    if engineer_features:
+        print("\nEngineering features for training set...")
+        X_train_eng = engineer_dataset_features(X_train, feature_names, verbose=True)
+        print("Engineering features for validation set...")
+        X_val_eng = engineer_dataset_features(X_val, feature_names, verbose=False)
+        print(f"Engineered feature dim: {X_train_eng.shape[1]}")
+    else:
+        X_train_eng = X_train.reshape(len(X_train), -1)
+        X_val_eng = X_val.reshape(len(X_val), -1)
+
+    use_feature_selection = fs_cfg.get("enabled", False)
+    selector = None
+
+    if use_feature_selection and engineer_features:
+        k_features = fs_cfg.get("k_features", 500)
+        aggregation = fs_cfg.get("aggregation", "mean_rank")
+        use_mt_lasso = fs_cfg.get("use_multitask_lasso", False)
+        combine_methods = fs_cfg.get("combine_methods", False)
+        lasso_alpha = fs_cfg.get("lasso_alpha", None)
+
+        print("\n" + "=" * 70)
+        print("FEATURE SELECTION")
+        print("=" * 70)
+        print(f"Input features: {X_train_eng.shape[1]}")
+        print(f"Target features: {k_features}")
+        if use_mt_lasso:
+            print("Method: Multi-task LASSO")
+        elif combine_methods:
+            print("Method: Combined (CatBoost + Multi-task LASSO)")
+        else:
+            print(f"Method: CatBoost importance ({aggregation})")
+
+        selector = MultiTaskFeatureSelector(
+            k_features=k_features,
+            aggregation=aggregation,
+            use_multitask_lasso=use_mt_lasso,
+            combine_methods=combine_methods,
+            lasso_alpha=lasso_alpha,
+        )
+
+        y_dict_for_fs = {state: y_train[state] for state in AFFECTIVE_STATES}
+
+        X_train_selected = selector.fit_transform(
+            X_train_eng,
+            y_dict_for_fs,
+            feature_names=None,
+            verbose=True,
+        )
+        X_val_selected = selector.transform(X_val_eng)
+
+        print(f"\nSelected features: {X_train_selected.shape[1]}")
+
+        selector_path = run_dir / "checkpoints" / "feature_selector.pkl"
+        selector.save(str(selector_path))
+
+        X_train_final = X_train_selected
+        X_val_final = X_val_selected
+    else:
+        X_train_final = X_train_eng
+        X_val_final = X_val_eng
+
+    early_stopping = cb_cfg.get("early_stopping_rounds", 50)
+    cb_model_params = {
+        k: v for k, v in cb_cfg.items() if k != "early_stopping_rounds"
+    }
+
+    use_smote = imbalance_cfg.get("enabled", True)
+    smote_strategy = imbalance_cfg.get("strategy", "smote")
+    smote_k_neighbors = imbalance_cfg.get("smote_k_neighbors", 5)
+
+    optimize_thresholds = threshold_cfg.get("enabled", True)
+    threshold_metric = threshold_cfg.get("metric", "f1_macro")
+
+    calibrate_probabilities = calib_cfg.get("enabled", True)
+    calibration_method = calib_cfg.get("method", "sigmoid")
+    use_calibration_set = calib_cfg.get("use_calibration_set", False)
+    calibration_ratio = calib_cfg.get("calibration_ratio", 0.15)
+
+    X_calib, y_calib = None, None
+    if calibrate_probabilities and use_calibration_set:
+        X_train_final, y_train, X_calib, y_calib = create_calibration_split(
+            X_train_final, y_train, calibration_ratio=calibration_ratio, random_state=42, use_calibration_set=True
+        )
+    elif calibrate_probabilities and not use_calibration_set:
+        print("Using validation set for calibration (preserves training data)")
+        X_calib = X_val_final
+        y_calib = y_val
+
+    two_stage_cfg = cfg.get("two_stage", {})
+    use_two_stage = two_stage_cfg.get("enabled", True)
+    two_stage_binary = two_stage_cfg.get("stage1_binary", True)
+
+    imbalance_cfg_cost = cfg.get("imbalance_handling", {})
+    cost_sensitive_enabled = imbalance_cfg_cost.get("cost_sensitive", {}).get("enabled", True) if isinstance(imbalance_cfg_cost.get("cost_sensitive"), dict) else True
+    distant_class_penalty = imbalance_cfg_cost.get("cost_sensitive", {}).get("distant_class_penalty", 3.0) if isinstance(imbalance_cfg_cost.get("cost_sensitive"), dict) else 3.0
+
+    per_class_thresholds = threshold_cfg.get("per_class_optimization", True)
+    ordinal_aware = threshold_cfg.get("ordinal_aware", True)
+
+    state_strategies = two_stage_cfg.get("state_strategies", {})
+
+    cb_model = EngagementCatBoost(
+        num_classes=model_cfg.get("num_classes", 3),
+        use_gpu=model_cfg.get("use_gpu", False),
+        early_stopping_rounds=early_stopping,
+        use_smote=use_smote,
+        smote_strategy=smote_strategy,
+        smote_k_neighbors=smote_k_neighbors,
+        calibrate_probabilities=calibrate_probabilities,
+        calibration_method=calibration_method,
+        optimize_thresholds=optimize_thresholds,
+        threshold_metric=threshold_metric,
+        per_class_thresholds=per_class_thresholds,
+        ordinal_aware=ordinal_aware,
+        use_two_stage=use_two_stage,
+        two_stage_binary=two_stage_binary,
+        cost_sensitive_enabled=cost_sensitive_enabled,
+        distant_class_penalty=distant_class_penalty,
+        state_strategies=state_strategies,
+        **cb_model_params,
+    )
+
+    print("\nTraining CatBoost model:")
+    print(f"  SMOTE: {use_smote} (strategy={smote_strategy})")
+    if use_smote:
+        print("    SMOTE applied after feature selection (in reduced dimensionality)")
+    print(f"  Two-stage: {use_two_stage}")
+    if state_strategies:
+        print("  Per-state strategies:")
+        for state, strategy in state_strategies.items():
+            print(f"    {state}: {strategy}")
+    print(f"  Cost-sensitive: {cost_sensitive_enabled}")
+    if cost_sensitive_enabled:
+        print(f"    Distant penalty: {distant_class_penalty}")
+    print(f"  Calibration: {calibrate_probabilities}")
+    if calibrate_probabilities:
+        if use_calibration_set and X_calib is not None:
+            print(f"    Calibration set: {len(X_calib)} samples")
+        else:
+            print("    Using validation set for calibration")
+    print(f"  Threshold optimization: {optimize_thresholds}")
+    if optimize_thresholds:
+        print(f"    Per-class: {per_class_thresholds}")
+        print(f"    Ordinal-aware: {ordinal_aware}")
+
+    cb_model.fit(
+        X_train_final,
+        y_train,
+        X_val_final,
+        y_val,
+        X_calib=X_calib,
+        y_calib=y_calib,
+        feature_names=None,
+        verbose=True,
+    )
+
+    ckpt_path = (
+        run_dir
+        / "checkpoints"
+        / cfg["output"].get("checkpoint_filename", "final_model.pt")
+    )
+    cb_model.save(str(ckpt_path))
+
+    history_path = run_dir / "metrics" / "training_history.csv"
+    pd.DataFrame([{"note": "CatBoost does not produce per-epoch history."}]).to_csv(
+        history_path, index=False
+    )
+
+    fi_cfg = cfg.get("feature_importance", {})
+    if fi_cfg.get("enabled", False):
+        print("\n" + "=" * 70)
+        print("FEATURE IMPORTANCE ANALYSIS (Two-Stage)")
+        print("=" * 70)
+
+        cb_models = {}
+        for state in AFFECTIVE_STATES:
+            model = cb_model.models[state]
+            if model is None and getattr(cb_model, "use_two_stage", False):
+                model = cb_model.stage1_models.get(state)
+                if model is not None:
+                    print(f"  Using stage1 model for feature importance: {state}")
+            cb_models[state] = model
+
+        y_val_dict = {state: y_val[state] for state in AFFECTIVE_STATES}
+
+        print(
+            f"Using features that models were trained on: "
+            f"{X_train_final.shape[1]} features"
+        )
+
+        engineered_feature_names = [
+            f"feature_{i}" for i in range(X_train_final.shape[1])
+        ]
+
+        feature_engineer = None
+        fe_cfg = cfg.get("feature_engineering", {})
+        if fe_cfg.get("enabled", True):
+            try:
+                feature_engineer = FeatureEngineer(feature_names)
+                print(
+                    f"Created FeatureEngineer for mapping: "
+                    f"{len(feature_names)} original features"
+                )
+            except Exception as e:
+                print(f"Warning: Could not create FeatureEngineer: {e}")
+
+        fi_selected_indices = None
+        if selector is not None:
+            if (
+                hasattr(selector, "selected_indices")
+                and selector.selected_indices is not None
+            ):
+                fi_selected_indices = selector.selected_indices
+                print(
+                    f"Feature selection applied: "
+                    f"{len(fi_selected_indices)} selected indices"
+                )
+
+        fi_output_dir = run_dir / "feature_importance"
+        fi_results = run_feature_importance_analysis(
+            models=cb_models,
+            X_train=X_train_final,
+            X_val=X_val_final,
+            X_test=None,
+            y_val=y_val_dict,
+            feature_names=engineered_feature_names,
+            output_dir=str(fi_output_dir),
+            config=cfg,
+            feature_engineer=feature_engineer,
+            original_feature_names=feature_names,
+            selected_indices=fi_selected_indices,
+            verbose=True,
+        )
+
+        print(f"\n  Feature importance analysis saved to: {fi_output_dir}")
+
+    return (
+        cb_model,
+        X_train_final,
+        X_val_final,
+        selector,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Random Forest training
+# ---------------------------------------------------------------------------
+
+
+def train_random_forest(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
+    model_cfg = cfg["model"]
+    rf_cfg = cfg.get("random_forest", {})
+    fe_cfg = cfg.get("feature_engineering", {})
+    fs_cfg = cfg.get("feature_selection", {})
+    imbalance_cfg = cfg.get("imbalance_handling", {})
+    threshold_cfg = cfg.get("threshold_optimization", {})
+    calib_cfg = cfg.get("calibration", {})
+
+    engineer_features = fe_cfg.get("enabled", True)
+
+    if engineer_features:
+        print("\nEngineering features for training set...")
+        X_train_eng = engineer_dataset_features(X_train, feature_names, verbose=True)
+        print("Engineering features for validation set...")
+        X_val_eng = engineer_dataset_features(X_val, feature_names, verbose=False)
+        print(f"Engineered feature dim: {X_train_eng.shape[1]}")
+    else:
+        X_train_eng = X_train.reshape(len(X_train), -1)
+        X_val_eng = X_val.reshape(len(X_val), -1)
+
+    use_feature_selection = fs_cfg.get("enabled", False)
+    selector = None
+
+    if use_feature_selection and engineer_features:
+        k_features = fs_cfg.get("k_features", 500)
+        aggregation = fs_cfg.get("aggregation", "mean_rank")
+        use_mt_lasso = fs_cfg.get("use_multitask_lasso", False)
+        combine_methods = fs_cfg.get("combine_methods", False)
+        lasso_alpha = fs_cfg.get("lasso_alpha", None)
+
+        print("\n" + "=" * 70)
+        print("FEATURE SELECTION")
+        print("=" * 70)
+        print(f"Input features: {X_train_eng.shape[1]}")
+        print(f"Target features: {k_features}")
+        if use_mt_lasso:
+            print("Method: Multi-task LASSO")
+        elif combine_methods:
+            print("Method: Combined (Random Forest + Multi-task LASSO)")
+        else:
+            print(f"Method: Random Forest importance ({aggregation})")
+
+        selector = MultiTaskFeatureSelector(
+            k_features=k_features,
+            aggregation=aggregation,
+            use_multitask_lasso=use_mt_lasso,
+            combine_methods=combine_methods,
+            lasso_alpha=lasso_alpha,
+        )
+
+        y_dict_for_fs = {state: y_train[state] for state in AFFECTIVE_STATES}
+
+        X_train_selected = selector.fit_transform(
+            X_train_eng,
+            y_dict_for_fs,
+            feature_names=None,
+            verbose=True,
+        )
+        X_val_selected = selector.transform(X_val_eng)
+
+        print(f"\nSelected features: {X_train_selected.shape[1]}")
+
+        selector_path = run_dir / "checkpoints" / "feature_selector.pkl"
+        selector.save(str(selector_path))
+
+        X_train_final = X_train_selected
+        X_val_final = X_val_selected
+    else:
+        X_train_final = X_train_eng
+        X_val_final = X_val_eng
+
+    rf_model_params = dict(rf_cfg)
+
+    use_smote = imbalance_cfg.get("enabled", True)
+    smote_strategy = imbalance_cfg.get("strategy", "smote")
+    smote_k_neighbors = imbalance_cfg.get("smote_k_neighbors", 5)
+
+    optimize_thresholds = threshold_cfg.get("enabled", True)
+    threshold_metric = threshold_cfg.get("metric", "f1_macro")
+
+    calibrate_probabilities = calib_cfg.get("enabled", True)
+    calibration_method = calib_cfg.get("method", "sigmoid")
+    use_calibration_set = calib_cfg.get("use_calibration_set", False)
+    calibration_ratio = calib_cfg.get("calibration_ratio", 0.15)
+
+    X_calib, y_calib = None, None
+    if calibrate_probabilities and use_calibration_set:
+        X_train_final, y_train, X_calib, y_calib = create_calibration_split(
+            X_train_final, y_train, calibration_ratio=calibration_ratio, random_state=42, use_calibration_set=True
+        )
+    elif calibrate_probabilities and not use_calibration_set:
+        print("Using validation set for calibration (preserves training data)")
+        X_calib = X_val_final
+        y_calib = y_val
+
+    two_stage_cfg = cfg.get("two_stage", {})
+    use_two_stage = two_stage_cfg.get("enabled", True)
+    two_stage_binary = two_stage_cfg.get("stage1_binary", True)
+
+    imbalance_cfg_cost = cfg.get("imbalance_handling", {})
+    cost_sensitive_enabled = imbalance_cfg_cost.get("cost_sensitive", {}).get("enabled", True) if isinstance(imbalance_cfg_cost.get("cost_sensitive"), dict) else True
+    distant_class_penalty = imbalance_cfg_cost.get("cost_sensitive", {}).get("distant_class_penalty", 3.0) if isinstance(imbalance_cfg_cost.get("cost_sensitive"), dict) else 3.0
+
+    per_class_thresholds = threshold_cfg.get("per_class_optimization", True)
+    ordinal_aware = threshold_cfg.get("ordinal_aware", True)
+
+    state_strategies = two_stage_cfg.get("state_strategies", {})
+
+    rf_model = EngagementRandomForest(
+        num_classes=model_cfg.get("num_classes", 3),
+        use_smote=use_smote,
+        smote_strategy=smote_strategy,
+        smote_k_neighbors=smote_k_neighbors,
+        calibrate_probabilities=calibrate_probabilities,
+        calibration_method=calibration_method,
+        optimize_thresholds=optimize_thresholds,
+        threshold_metric=threshold_metric,
+        per_class_thresholds=per_class_thresholds,
+        ordinal_aware=ordinal_aware,
+        use_two_stage=use_two_stage,
+        two_stage_binary=two_stage_binary,
+        cost_sensitive_enabled=cost_sensitive_enabled,
+        distant_class_penalty=distant_class_penalty,
+        state_strategies=state_strategies,
+        **rf_model_params,
+    )
+
+    print("\nTraining Random Forest model:")
+    print(f"  SMOTE: {use_smote} (strategy={smote_strategy})")
+    if use_smote:
+        print("    SMOTE applied after feature selection (in reduced dimensionality)")
+    print(f"  Two-stage: {use_two_stage}")
+    if state_strategies:
+        print("  Per-state strategies:")
+        for state, strategy in state_strategies.items():
+            print(f"    {state}: {strategy}")
+    print(f"  Cost-sensitive: {cost_sensitive_enabled}")
+    if cost_sensitive_enabled:
+        print(f"    Distant penalty: {distant_class_penalty}")
+    print(f"  Calibration: {calibrate_probabilities}")
+    if calibrate_probabilities:
+        if use_calibration_set and X_calib is not None:
+            print(f"    Calibration set: {len(X_calib)} samples")
+        else:
+            print("    Using validation set for calibration")
+    print(f"  Threshold optimization: {optimize_thresholds}")
+    if optimize_thresholds:
+        print(f"    Per-class: {per_class_thresholds}")
+        print(f"    Ordinal-aware: {ordinal_aware}")
+
+    rf_model.fit(
+        X_train_final,
+        y_train,
+        X_val_final,
+        y_val,
+        X_calib=X_calib,
+        y_calib=y_calib,
+        feature_names=None,
+        verbose=True,
+    )
+
+    ckpt_path = (
+        run_dir
+        / "checkpoints"
+        / cfg["output"].get("checkpoint_filename", "final_model.pt")
+    )
+    rf_model.save(str(ckpt_path))
+
+    history_path = run_dir / "metrics" / "training_history.csv"
+    pd.DataFrame([{"note": "Random Forest does not produce per-epoch history."}]).to_csv(
+        history_path, index=False
+    )
+
+    fi_cfg = cfg.get("feature_importance", {})
+    if fi_cfg.get("enabled", False):
+        print("\n" + "=" * 70)
+        print("FEATURE IMPORTANCE ANALYSIS (Two-Stage)")
+        print("=" * 70)
+
+        rf_models = {}
+        for state in AFFECTIVE_STATES:
+            model = rf_model.models[state]
+            if model is None and getattr(rf_model, "use_two_stage", False):
+                model = rf_model.stage1_models.get(state)
+                if model is not None:
+                    print(f"  Using stage1 model for feature importance: {state}")
+            rf_models[state] = model
+
+        y_val_dict = {state: y_val[state] for state in AFFECTIVE_STATES}
+
+        print(
+            f"Using features that models were trained on: "
+            f"{X_train_final.shape[1]} features"
+        )
+
+        engineered_feature_names = [
+            f"feature_{i}" for i in range(X_train_final.shape[1])
+        ]
+
+        feature_engineer = None
+        fe_cfg = cfg.get("feature_engineering", {})
+        if fe_cfg.get("enabled", True):
+            try:
+                feature_engineer = FeatureEngineer(feature_names)
+                print(
+                    f"Created FeatureEngineer for mapping: "
+                    f"{len(feature_names)} original features"
+                )
+            except Exception as e:
+                print(f"Warning: Could not create FeatureEngineer: {e}")
+
+        fi_selected_indices = None
+        if selector is not None:
+            if (
+                hasattr(selector, "selected_indices")
+                and selector.selected_indices is not None
+            ):
+                fi_selected_indices = selector.selected_indices
+                print(
+                    f"Feature selection applied: "
+                    f"{len(fi_selected_indices)} selected indices"
+                )
+
+        fi_output_dir = run_dir / "feature_importance"
+        fi_results = run_feature_importance_analysis(
+            models=rf_models,
+            X_train=X_train_final,
+            X_val=X_val_final,
+            X_test=None,
+            y_val=y_val_dict,
+            feature_names=engineered_feature_names,
+            output_dir=str(fi_output_dir),
+            config=cfg,
+            feature_engineer=feature_engineer,
+            original_feature_names=feature_names,
+            selected_indices=fi_selected_indices,
+            verbose=True,
+        )
+
+        print(f"\n  Feature importance analysis saved to: {fi_output_dir}")
+
+    return (
+        rf_model,
+        X_train_final,
+        X_val_final,
+        selector,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Evaluation helpers (shared LSTM / XGBoost / LightGBM / CatBoost / Random Forest)
 # ---------------------------------------------------------------------------
 
 
@@ -2638,6 +3155,206 @@ def main():
             fi_output_dir = run_dir / "feature_importance"
             fi_results = run_feature_importance_analysis(
                 models=lgb_models,
+                X_train=X_train_final,
+                X_val=X_val_final,
+                X_test=X_test_final,
+                y_val=y_val_dict,
+                feature_names=engineered_feature_names,
+                output_dir=str(fi_output_dir),
+                config=cfg,
+                feature_engineer=feature_engineer,
+                original_feature_names=feature_names,
+                selected_indices=fi_selected_indices,
+                verbose=True,
+            )
+
+            print(f"\n  Feature importance analysis saved to: {fi_output_dir}")
+
+        # No epoch-based training curves — skip
+        history = {}
+
+    # -------------------------------------------------------------------
+    # Branch: CatBoost
+    # -------------------------------------------------------------------
+    elif model_name == "catboost":
+        fe_cfg = cfg.get("feature_engineering", {})
+        fs_cfg = cfg.get("feature_selection", {})
+
+        cb_model, X_train_final, X_val_final, selector = train_catboost(
+            X_train, y_train, X_val, y_val, cfg, run_dir, feature_names
+        )
+
+        # Engineer test features
+        if fe_cfg.get("enabled", True):
+            print("\nEngineering features for test set...")
+            X_test_eng = engineer_dataset_features(
+                np.array(X_test), feature_names, verbose=False
+            )
+        else:
+            X_test_eng = np.array(X_test).reshape(len(X_test), -1)
+
+        # Apply feature selection if enabled
+        if selector is not None and fs_cfg.get("enabled", False):
+            print("Applying feature selection to test set...")
+            X_test_final = selector.transform(X_test_eng)
+            print(f"Test features after selection: {X_test_final.shape[1]}")
+        else:
+            X_test_final = X_test_eng
+
+        all_preds, all_probs = predict_xgboost(cb_model, X_test_final)
+
+        # Feature Importance Analysis (Two-Stage: SHAP + Permutation)
+        fi_cfg = cfg.get("feature_importance", {})
+        if fi_cfg.get("enabled", False):
+            print("\n" + "=" * 70)
+            print("FEATURE IMPORTANCE ANALYSIS (Two-Stage)")
+            print("=" * 70)
+
+            from analysis.feature_importance_integration import (
+                run_feature_importance_analysis,
+            )
+
+            cb_models = {}
+            for state in AFFECTIVE_STATES:
+                model = cb_model.models[state]
+                if model is None and getattr(cb_model, "use_two_stage", False):
+                    model = cb_model.stage1_models.get(state)
+                cb_models[state] = model
+
+            y_val_dict = {state: y_val[state] for state in AFFECTIVE_STATES}
+
+            print(
+                f"Using features that models were trained on: {X_train_final.shape[1]} features"
+            )
+
+            engineered_feature_names = [
+                f"feature_{i}" for i in range(X_train_final.shape[1])
+            ]
+
+            feature_engineer = None
+            if fe_cfg.get("enabled", True):
+                try:
+                    feature_engineer = FeatureEngineer(feature_names)
+                    print(
+                        f"Created FeatureEngineer for mapping: {len(feature_names)} original features"
+                    )
+                except Exception as e:
+                    print(f"Warning: Could not create FeatureEngineer: {e}")
+
+            fi_selected_indices = None
+            if selector is not None and fs_cfg.get("enabled", False):
+                if (
+                    hasattr(selector, "selected_indices")
+                    and selector.selected_indices is not None
+                ):
+                    fi_selected_indices = selector.selected_indices
+                    print(
+                        f"Feature selection applied: {len(fi_selected_indices)} selected indices"
+                    )
+
+            fi_output_dir = run_dir / "feature_importance"
+            fi_results = run_feature_importance_analysis(
+                models=cb_models,
+                X_train=X_train_final,
+                X_val=X_val_final,
+                X_test=X_test_final,
+                y_val=y_val_dict,
+                feature_names=engineered_feature_names,
+                output_dir=str(fi_output_dir),
+                config=cfg,
+                feature_engineer=feature_engineer,
+                original_feature_names=feature_names,
+                selected_indices=fi_selected_indices,
+                verbose=True,
+            )
+
+            print(f"\n  Feature importance analysis saved to: {fi_output_dir}")
+
+        # No epoch-based training curves — skip
+        history = {}
+
+    # -------------------------------------------------------------------
+    # Branch: Random Forest
+    # -------------------------------------------------------------------
+    elif model_name == "random_forest":
+        fe_cfg = cfg.get("feature_engineering", {})
+        fs_cfg = cfg.get("feature_selection", {})
+
+        rf_model, X_train_final, X_val_final, selector = train_random_forest(
+            X_train, y_train, X_val, y_val, cfg, run_dir, feature_names
+        )
+
+        # Engineer test features
+        if fe_cfg.get("enabled", True):
+            print("\nEngineering features for test set...")
+            X_test_eng = engineer_dataset_features(
+                np.array(X_test), feature_names, verbose=False
+            )
+        else:
+            X_test_eng = np.array(X_test).reshape(len(X_test), -1)
+
+        # Apply feature selection if enabled
+        if selector is not None and fs_cfg.get("enabled", False):
+            print("Applying feature selection to test set...")
+            X_test_final = selector.transform(X_test_eng)
+            print(f"Test features after selection: {X_test_final.shape[1]}")
+        else:
+            X_test_final = X_test_eng
+
+        all_preds, all_probs = predict_xgboost(rf_model, X_test_final)
+
+        # Feature Importance Analysis (Two-Stage: SHAP + Permutation)
+        fi_cfg = cfg.get("feature_importance", {})
+        if fi_cfg.get("enabled", False):
+            print("\n" + "=" * 70)
+            print("FEATURE IMPORTANCE ANALYSIS (Two-Stage)")
+            print("=" * 70)
+
+            from analysis.feature_importance_integration import (
+                run_feature_importance_analysis,
+            )
+
+            rf_models = {}
+            for state in AFFECTIVE_STATES:
+                model = rf_model.models[state]
+                if model is None and getattr(rf_model, "use_two_stage", False):
+                    model = rf_model.stage1_models.get(state)
+                rf_models[state] = model
+
+            y_val_dict = {state: y_val[state] for state in AFFECTIVE_STATES}
+
+            print(
+                f"Using features that models were trained on: {X_train_final.shape[1]} features"
+            )
+
+            engineered_feature_names = [
+                f"feature_{i}" for i in range(X_train_final.shape[1])
+            ]
+
+            feature_engineer = None
+            if fe_cfg.get("enabled", True):
+                try:
+                    feature_engineer = FeatureEngineer(feature_names)
+                    print(
+                        f"Created FeatureEngineer for mapping: {len(feature_names)} original features"
+                    )
+                except Exception as e:
+                    print(f"Warning: Could not create FeatureEngineer: {e}")
+
+            fi_selected_indices = None
+            if selector is not None and fs_cfg.get("enabled", False):
+                if (
+                    hasattr(selector, "selected_indices")
+                    and selector.selected_indices is not None
+                ):
+                    fi_selected_indices = selector.selected_indices
+                    print(
+                        f"Feature selection applied: {len(fi_selected_indices)} selected indices"
+                    )
+
+            fi_output_dir = run_dir / "feature_importance"
+            fi_results = run_feature_importance_analysis(
+                models=rf_models,
                 X_train=X_train_final,
                 X_val=X_val_final,
                 X_test=X_test_final,
