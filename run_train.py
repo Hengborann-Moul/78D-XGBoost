@@ -852,11 +852,37 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
 
     engineer_features = fe_cfg.get("enabled", True)
 
+    # Feature engineering toggle flags (for ablation experiments)
+    fe_include_statistical = fe_cfg.get("include_statistical", True)
+    fe_include_temporal = fe_cfg.get("include_temporal", True)
+    fe_include_frequency = fe_cfg.get("include_frequency", True)
+    fe_include_interaction = fe_cfg.get("include_interaction", True)
+    fe_include_domain = fe_cfg.get("include_domain", True)
+
     if engineer_features:
         print("\nEngineering features for training set...")
-        X_train_eng = engineer_dataset_features(X_train, feature_names, verbose=True)
+        if not all([fe_include_statistical, fe_include_temporal, fe_include_frequency,
+                     fe_include_interaction, fe_include_domain]):
+            print(f"  Feature groups: statistical={fe_include_statistical}, "
+                  f"temporal={fe_include_temporal}, frequency={fe_include_frequency}, "
+                  f"interaction={fe_include_interaction}, domain={fe_include_domain}")
+        X_train_eng = engineer_dataset_features(
+            X_train, feature_names, verbose=True,
+            include_statistical=fe_include_statistical,
+            include_temporal=fe_include_temporal,
+            include_frequency=fe_include_frequency,
+            include_interaction=fe_include_interaction,
+            include_domain=fe_include_domain,
+        )
         print("Engineering features for validation set...")
-        X_val_eng = engineer_dataset_features(X_val, feature_names, verbose=False)
+        X_val_eng = engineer_dataset_features(
+            X_val, feature_names, verbose=False,
+            include_statistical=fe_include_statistical,
+            include_temporal=fe_include_temporal,
+            include_frequency=fe_include_frequency,
+            include_interaction=fe_include_interaction,
+            include_domain=fe_include_domain,
+        )
         print(f"Engineered feature dim: {X_train_eng.shape[1]}")
     else:
         X_train_eng = X_train.reshape(len(X_train), -1)
@@ -1148,11 +1174,37 @@ def train_lightgbm(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
 
     engineer_features = fe_cfg.get("enabled", True)
 
+    # Feature engineering toggle flags (for ablation experiments)
+    fe_include_statistical = fe_cfg.get("include_statistical", True)
+    fe_include_temporal = fe_cfg.get("include_temporal", True)
+    fe_include_frequency = fe_cfg.get("include_frequency", True)
+    fe_include_interaction = fe_cfg.get("include_interaction", True)
+    fe_include_domain = fe_cfg.get("include_domain", True)
+
     if engineer_features:
         print("\nEngineering features for training set...")
-        X_train_eng = engineer_dataset_features(X_train, feature_names, verbose=True)
+        if not all([fe_include_statistical, fe_include_temporal, fe_include_frequency,
+                     fe_include_interaction, fe_include_domain]):
+            print(f"  Feature groups: statistical={fe_include_statistical}, "
+                  f"temporal={fe_include_temporal}, frequency={fe_include_frequency}, "
+                  f"interaction={fe_include_interaction}, domain={fe_include_domain}")
+        X_train_eng = engineer_dataset_features(
+            X_train, feature_names, verbose=True,
+            include_statistical=fe_include_statistical,
+            include_temporal=fe_include_temporal,
+            include_frequency=fe_include_frequency,
+            include_interaction=fe_include_interaction,
+            include_domain=fe_include_domain,
+        )
         print("Engineering features for validation set...")
-        X_val_eng = engineer_dataset_features(X_val, feature_names, verbose=False)
+        X_val_eng = engineer_dataset_features(
+            X_val, feature_names, verbose=False,
+            include_statistical=fe_include_statistical,
+            include_temporal=fe_include_temporal,
+            include_frequency=fe_include_frequency,
+            include_interaction=fe_include_interaction,
+            include_domain=fe_include_domain,
+        )
         print(f"Engineered feature dim: {X_train_eng.shape[1]}")
     else:
         X_train_eng = X_train.reshape(len(X_train), -1)
@@ -1418,11 +1470,37 @@ def train_catboost(X_train, y_train, X_val, y_val, cfg, run_dir, feature_names):
 
     engineer_features = fe_cfg.get("enabled", True)
 
+    # Feature engineering toggle flags (for ablation experiments)
+    fe_include_statistical = fe_cfg.get("include_statistical", True)
+    fe_include_temporal = fe_cfg.get("include_temporal", True)
+    fe_include_frequency = fe_cfg.get("include_frequency", True)
+    fe_include_interaction = fe_cfg.get("include_interaction", True)
+    fe_include_domain = fe_cfg.get("include_domain", True)
+
     if engineer_features:
         print("\nEngineering features for training set...")
-        X_train_eng = engineer_dataset_features(X_train, feature_names, verbose=True)
+        if not all([fe_include_statistical, fe_include_temporal, fe_include_frequency,
+                     fe_include_interaction, fe_include_domain]):
+            print(f"  Feature groups: statistical={fe_include_statistical}, "
+                  f"temporal={fe_include_temporal}, frequency={fe_include_frequency}, "
+                  f"interaction={fe_include_interaction}, domain={fe_include_domain}")
+        X_train_eng = engineer_dataset_features(
+            X_train, feature_names, verbose=True,
+            include_statistical=fe_include_statistical,
+            include_temporal=fe_include_temporal,
+            include_frequency=fe_include_frequency,
+            include_interaction=fe_include_interaction,
+            include_domain=fe_include_domain,
+        )
         print("Engineering features for validation set...")
-        X_val_eng = engineer_dataset_features(X_val, feature_names, verbose=False)
+        X_val_eng = engineer_dataset_features(
+            X_val, feature_names, verbose=False,
+            include_statistical=fe_include_statistical,
+            include_temporal=fe_include_temporal,
+            include_frequency=fe_include_frequency,
+            include_interaction=fe_include_interaction,
+            include_domain=fe_include_domain,
+        )
         print(f"Engineered feature dim: {X_train_eng.shape[1]}")
     else:
         X_train_eng = X_train.reshape(len(X_train), -1)
@@ -1678,11 +1756,37 @@ def train_random_forest(X_train, y_train, X_val, y_val, cfg, run_dir, feature_na
 
     engineer_features = fe_cfg.get("enabled", True)
 
+    # Feature engineering toggle flags (for ablation experiments)
+    fe_include_statistical = fe_cfg.get("include_statistical", True)
+    fe_include_temporal = fe_cfg.get("include_temporal", True)
+    fe_include_frequency = fe_cfg.get("include_frequency", True)
+    fe_include_interaction = fe_cfg.get("include_interaction", True)
+    fe_include_domain = fe_cfg.get("include_domain", True)
+
     if engineer_features:
         print("\nEngineering features for training set...")
-        X_train_eng = engineer_dataset_features(X_train, feature_names, verbose=True)
+        if not all([fe_include_statistical, fe_include_temporal, fe_include_frequency,
+                     fe_include_interaction, fe_include_domain]):
+            print(f"  Feature groups: statistical={fe_include_statistical}, "
+                  f"temporal={fe_include_temporal}, frequency={fe_include_frequency}, "
+                  f"interaction={fe_include_interaction}, domain={fe_include_domain}")
+        X_train_eng = engineer_dataset_features(
+            X_train, feature_names, verbose=True,
+            include_statistical=fe_include_statistical,
+            include_temporal=fe_include_temporal,
+            include_frequency=fe_include_frequency,
+            include_interaction=fe_include_interaction,
+            include_domain=fe_include_domain,
+        )
         print("Engineering features for validation set...")
-        X_val_eng = engineer_dataset_features(X_val, feature_names, verbose=False)
+        X_val_eng = engineer_dataset_features(
+            X_val, feature_names, verbose=False,
+            include_statistical=fe_include_statistical,
+            include_temporal=fe_include_temporal,
+            include_frequency=fe_include_frequency,
+            include_interaction=fe_include_interaction,
+            include_domain=fe_include_domain,
+        )
         print(f"Engineered feature dim: {X_train_eng.shape[1]}")
     else:
         X_train_eng = X_train.reshape(len(X_train), -1)
@@ -2064,6 +2168,13 @@ def train_ensemble(
 
     engineer_features = fe_cfg.get("enabled", True)
 
+    # Feature engineering toggle flags (for ablation experiments)
+    fe_include_statistical = fe_cfg.get("include_statistical", True)
+    fe_include_temporal = fe_cfg.get("include_temporal", True)
+    fe_include_frequency = fe_cfg.get("include_frequency", True)
+    fe_include_interaction = fe_cfg.get("include_interaction", True)
+    fe_include_domain = fe_cfg.get("include_domain", True)
+
     X_train_arr = np.array(X_train)
     X_val_arr = np.array(X_val)
     X_test_arr = np.array(X_test)
@@ -2072,19 +2183,39 @@ def train_ensemble(
     cache_dir = run_dir / "cache"
     if engineer_features:
         print("\nEngineering features for training set ...")
+        if not all([fe_include_statistical, fe_include_temporal, fe_include_frequency,
+                     fe_include_interaction, fe_include_domain]):
+            print(f"  Feature groups: statistical={fe_include_statistical}, "
+                  f"temporal={fe_include_temporal}, frequency={fe_include_frequency}, "
+                  f"interaction={fe_include_interaction}, domain={fe_include_domain}")
         X_train_eng = engineer_dataset_features(
             X_train_arr, feature_names, verbose=True,
             cache_path=str(cache_dir / "X_train_eng.npy"),
+            include_statistical=fe_include_statistical,
+            include_temporal=fe_include_temporal,
+            include_frequency=fe_include_frequency,
+            include_interaction=fe_include_interaction,
+            include_domain=fe_include_domain,
         )
         print("Engineering features for validation set ...")
         X_val_eng = engineer_dataset_features(
             X_val_arr, feature_names, verbose=False,
             cache_path=str(cache_dir / "X_val_eng.npy"),
+            include_statistical=fe_include_statistical,
+            include_temporal=fe_include_temporal,
+            include_frequency=fe_include_frequency,
+            include_interaction=fe_include_interaction,
+            include_domain=fe_include_domain,
         )
         print("Engineering features for test set ...")
         X_test_eng = engineer_dataset_features(
             X_test_arr, feature_names, verbose=False,
             cache_path=str(cache_dir / "X_test_eng.npy"),
+            include_statistical=fe_include_statistical,
+            include_temporal=fe_include_temporal,
+            include_frequency=fe_include_frequency,
+            include_interaction=fe_include_interaction,
+            include_domain=fe_include_domain,
         )
         print(f"Engineered feature dim: {X_train_eng.shape[1]}")
     else:

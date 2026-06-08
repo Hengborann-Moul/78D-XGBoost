@@ -791,6 +791,11 @@ def engineer_dataset_features(
     feature_names: List[str],
     verbose: bool = True,
     cache_path: Optional[str] = None,
+    include_statistical: bool = True,
+    include_temporal: bool = True,
+    include_frequency: bool = True,
+    include_interaction: bool = True,
+    include_domain: bool = True,
 ) -> np.ndarray:
     """
     Engineer features for entire dataset.
@@ -804,6 +809,11 @@ def engineer_dataset_features(
         feature_names: List of 78 base feature names
         verbose: Show progress
         cache_path: Optional path to save/load engineered features (.npy).
+        include_statistical: Include statistical features (mean, std, percentiles, etc.)
+        include_temporal: Include temporal dynamics features (velocity, acceleration, etc.)
+        include_frequency: Include frequency domain features (FFT, spectral, etc.)
+        include_interaction: Include feature interaction features (correlations, ratios)
+        include_domain: Include domain-specific features (attention, arousal, valence, etc.)
 
     Returns:
         engineered: (num_videos, engineered_dim) array
@@ -838,7 +848,14 @@ def engineer_dataset_features(
         iterator = range(num_videos)
 
     for i in iterator:
-        feat = engineer.engineer_features(sequences[i])
+        feat = engineer.engineer_features(
+            sequences[i],
+            include_statistical=include_statistical,
+            include_temporal=include_temporal,
+            include_frequency=include_frequency,
+            include_interaction=include_interaction,
+            include_domain=include_domain,
+        )
         engineered_features.append(feat["all"])
 
     # Final cleaning to ensure no NaN/Inf values in the entire dataset

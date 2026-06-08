@@ -26,13 +26,16 @@ normalization:
   strategy: "mixed"
 
 # --- Feature Engineering ---
+# Each feature group can be toggled independently for ablation experiments.
+# Default: statistical only — enable others one at a time to measure their
+# individual contribution.
 feature_engineering:
   enabled: true
   include_statistical:  true
-  include_temporal:     true
-  include_frequency:    true
-  include_interaction:  true
-  include_domain:       true
+  include_temporal:     false
+  include_frequency:    false
+  include_interaction:  false
+  include_domain:       false
 
 # --- Feature Selection ---
 feature_selection:
